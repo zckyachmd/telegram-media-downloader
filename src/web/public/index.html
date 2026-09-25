@@ -431,6 +431,26 @@
                                         </button>
                                     </div>
                                 </div>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                    <div>
+                                        <label class="block text-tg-textSecondary text-[11px] mb-1">BotFather bot</label>
+                                        <select id="fwd-bot-id" class="tg-input text-sm py-2 w-full">
+                                            <option value="">Use user account</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-tg-textSecondary text-[11px] mb-1">Destination topic ID</label>
+                                        <input type="number" id="fwd-destination-topic" class="tg-input text-sm py-2" placeholder="Optional">
+                                    </div>
+                                </div>
+                                <label onclick="toggleFwdProtect(event)" class="flex items-center justify-between py-1.5 cursor-pointer">
+                                    <span class="text-tg-text text-xs">Protect content (BotFather bot only)</span>
+                                    <div class="tg-toggle" id="fwd-protect-toggle"></div>
+                                </label>
+                                <label onclick="toggleFwdSpoiler(event)" class="flex items-center justify-between py-1.5 cursor-pointer">
+                                    <span class="text-tg-text text-xs">NSFW spoiler cover (explicit)</span>
+                                    <div class="tg-toggle" id="fwd-spoiler-toggle"></div>
+                                </label>
                                 <div>
                                     <label class="block text-tg-textSecondary text-[11px] mb-1">Caption mode</label>
                                     <select id="fwd-caption-mode" class="tg-input text-sm py-2 w-full">
@@ -1250,6 +1270,21 @@
                                 <i class="ri-save-line mr-2"></i><span data-i18n="settings.tg_api.save">Save credentials</span>
                             </button>
                         </div>
+                    </div>
+
+                    <div id="settings-card-tg-bots" data-settings-section="card-tg-bots" class="bg-tg-panel rounded-xl p-4 mb-4 scroll-mt-24" data-admin-only>
+                        <h3 class="text-tg-text font-medium mb-1 flex items-center gap-2">
+                            <i class="ri-robot-line text-tg-blue"></i> Telegram BotFather bots
+                        </h3>
+                        <p class="text-xs text-tg-textSecondary mb-3">Add a bot token from @BotFather. Tokens are stored encrypted and never displayed.</p>
+                        <div id="telegram-bots-list" class="space-y-2 mb-3"></div>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <input id="setting-bot-name" class="tg-input text-sm" placeholder="Name (optional)">
+                            <input id="setting-bot-token" type="password" class="tg-input text-sm" placeholder="BotFather token">
+                        </div>
+                        <button id="save-telegram-bot" class="tg-btn-secondary w-full text-sm mt-2">
+                            <i class="ri-add-line mr-2"></i>Add and verify bot
+                        </button>
                     </div>
                     </section>
 

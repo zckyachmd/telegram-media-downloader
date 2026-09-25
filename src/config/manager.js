@@ -1,8 +1,10 @@
 import path from 'path';
+import fs from 'fs';
 import { EventEmitter } from 'events';
 import { fileURLToPath } from 'url';
 import { kvGet, kvSet } from '../core/db.js';
 import { BACKPRESSURE_CAP_DEFAULT } from '../core/constants.js';
+import { getDataDir } from '../core/paths.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -11,11 +13,38 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // again — kv['config'] is the single source of truth.
 const LEGACY_CONFIG_PATH = path.join(__dirname, '../../data/config.json');
 const KV_KEY = 'config';
+const GROUPS_SNAPSHOT_PATH = path.join(getDataDir(), 'groups.snapshot.json');
+
+function readGroupsSnapshot() {
+    try {
+        const snapshot = JSON.parse(fs.readFileSync(GROUPS_SNAPSHOT_PATH, 'utf8'));
+        return Array.isArray(snapshot?.groups) ? snapshot.groups : null;
+    } catch {
+        return null;
+    }
+}
+
+function writeGroupsSnapshot(config) {
+    try {
+        const dataDir = getDataDir();
+        fs.mkdirSync(dataDir, { recursive: true });
+        const tmp = `${GROUPS_SNAPSHOT_PATH}.${process.pid}.tmp`;
+        fs.writeFileSync(
+            tmp,
+            JSON.stringify({ savedAt: new Date().toISOString(), groups: config.groups || [] }),
+            { mode: 0o600 },
+        );
+        fs.renameSync(tmp, GROUPS_SNAPSHOT_PATH);
+    } catch (error) {
+        console.error('Groups snapshot error:', error.message);
+    }
+}
 
 const DEFAULT_CONFIG = {
     telegram: {
         apiId: '',
         apiHash: '',
+        bots: [],
     },
     accounts: [],
     pollingInterval: 10,
@@ -89,6 +118,10 @@ const DEFAULT_CONFIG = {
             // Insert a 60-120s "coffee break" every N processed messages.
             // Set to 0 to disable. Helps avoid Telegram anti-flood bans.
             longBreakEveryN: 1000,
+        },
+        forwarding: {
+            // Serialize uploads and leave a conservative gap between sends.
+            minIntervalMs: 1500,
         },
         diskRotator: {
             // Rows fetched per pass when the rotator needs to delete old
@@ -598,8 +631,8 @@ const DEFAULT_CONFIG = {
 const DEFAULT_FILTERS = {
     photos: true,
     videos: true,
-    files: true,
-    links: true,
+    files: false,
+    links: false,
     voice: false,
     audio: false,
     gifs: false,
@@ -619,7 +652,11 @@ function mergeConfig(userConfig) {
     return {
         ...DEFAULT_CONFIG,
         ...userConfig, // User values overwrite defaults
-        telegram: { ...DEFAULT_CONFIG.telegram, ...userConfig.telegram },
+        telegram: {
+            ...DEFAULT_CONFIG.telegram,
+            ...userConfig.telegram,
+            bots: Array.isArray(userConfig.telegram?.bots) ? userConfig.telegram.bots : [],
+        },
         download: { ...DEFAULT_CONFIG.download, ...userConfig.download },
         rateLimits: { ...DEFAULT_CONFIG.rateLimits, ...userConfig.rateLimits },
         diskManagement: { ...DEFAULT_CONFIG.diskManagement, ...userConfig.diskManagement },
@@ -636,6 +673,10 @@ function mergeConfig(userConfig) {
                 ...(userAdvanced.downloader || {}),
             },
             history: { ...DEFAULT_CONFIG.advanced.history, ...(userAdvanced.history || {}) },
+            forwarding: {
+                ...DEFAULT_CONFIG.advanced.forwarding,
+                ...(userAdvanced.forwarding || {}),
+            },
             diskRotator: {
                 ...DEFAULT_CONFIG.advanced.diskRotator,
                 ...(userAdvanced.diskRotator || {}),
@@ -796,6 +837,20 @@ export function loadConfig() {
 
         const config = mergeConfig(stored);
 
+        // SQLite recovery can restore an older/empty config row while the
+        // media DB remains usable. Keep group pairing config in a tiny host-
+        // persisted sidecar and restore only the empty-config case.
+        if (config.groups.length === 0) {
+            const snapshotGroups = readGroupsSnapshot();
+            if (snapshotGroups?.length) {
+                config.groups = dedupeGroups(snapshotGroups).map((group) => ({
+                    ...group,
+                    filters: { ...DEFAULT_FILTERS, ...(group.filters || {}) },
+                }));
+                kvSet(KV_KEY, config);
+            }
+        }
+
         // Self-Healing: if merge surfaced new defaults (e.g. a release added
         // a new advanced.* sub-section), persist the merged tree so future
         // reads skip the merge cost and the dashboard sees the up-to-date
@@ -817,6 +872,7 @@ export function saveConfig(config) {
     // pattern provided: a writer crash mid-statement rolls back, no reader
     // ever sees a half-written row.
     kvSet(KV_KEY, config);
+    writeGroupsSnapshot(config);
     // Notify in-process subscribers (monitor, runtime, etc). Errors in
     // listeners must not break the save itself.
     try {

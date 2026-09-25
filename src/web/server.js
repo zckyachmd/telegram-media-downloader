@@ -73,6 +73,7 @@ import {
 import { sanitizeName } from '../core/downloader.js';
 import { SecureSession } from '../core/security.js';
 import { AccountManager } from '../core/accounts.js';
+import { TelegramBotClient, TelegramBotManager, encryptBotToken } from '../core/telegram-bot.js';
 import { loadConfig, saveConfig } from '../config/manager.js';
 import { runtime } from '../core/runtime.js';
 import { getDiskRotator } from '../core/disk-rotator.js';
@@ -2184,6 +2185,56 @@ app.get('/api/accounts', async (req, res) => {
     }
 });
 
+// BotFather credentials are Bot API bots, not GramJS user sessions.
+app.get('/api/bots', async (req, res) => {
+    try {
+        res.json(new TelegramBotManager(loadConfig()).list());
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/bots', async (req, res) => {
+    try {
+        const token = String(req.body?.token || '').trim();
+        if (!/^\d+:[A-Za-z0-9_-]+$/.test(token)) {
+            return res.status(400).json({ error: 'Invalid BotFather token' });
+        }
+        const me = await new TelegramBotClient({ token }).getMe();
+        const config = loadConfig();
+        config.telegram.bots = Array.isArray(config.telegram.bots) ? config.telegram.bots : [];
+        const id = TelegramBotManager.makeId(me.username);
+        const record = {
+            id,
+            name: String(req.body?.name || me.first_name || me.username || id).trim(),
+            username: me.username || '',
+            tokenEncrypted: encryptBotToken(token),
+            verified: true,
+            verifiedAt: new Date().toISOString(),
+        };
+        const index = config.telegram.bots.findIndex((bot) => bot.id === id);
+        if (index >= 0) config.telegram.bots[index] = record;
+        else config.telegram.bots.push(record);
+        await writeConfigAtomic(config);
+        res.json({ id, name: record.name, username: record.username });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
+
+app.delete('/api/bots/:id', async (req, res) => {
+    try {
+        const config = loadConfig();
+        config.telegram.bots = (config.telegram.bots || []).filter(
+            (bot) => String(bot.id) !== String(req.params.id),
+        );
+        await writeConfigAtomic(config);
+        res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ====== Telegram account add: phone → OTP → 2FA wizard ====================
 //
 // Each begin call returns a sessionId; subsequent submits use that id. The
@@ -2623,8 +2674,8 @@ app.post('/api/history', async (req, res) => {
                 filters: {
                     photos: true,
                     videos: true,
-                    files: true,
-                    links: true,
+                    files: false,
+                    links: false,
                     voice: false,
                     gifs: false,
                     stickers: false,
@@ -2632,8 +2683,12 @@ app.post('/api/history', async (req, res) => {
                 autoForward: {
                     enabled: false,
                     destination: null,
-                    deleteAfterForward: false,
-                    captionMode: 'copy',
+                    botId: null,
+                    destinationTopicId: null,
+                    protectContent: false,
+                    nsfwSpoiler: false,
+                    deleteAfterForward: true,
+                    captionMode: 'none',
                     captionPrefix: '',
                     captionSuffix: '',
                     captionReplacements: [],
@@ -4078,8 +4133,8 @@ app.get('/api/dialogs', async (req, res) => {
                     filters: configGroup?.filters || {
                         photos: true,
                         videos: true,
-                        files: true,
-                        links: true,
+                        files: false,
+                        links: false,
                         voice: false,
                         gifs: false,
                         stickers: false,
@@ -4087,7 +4142,8 @@ app.get('/api/dialogs', async (req, res) => {
                     autoForward: configGroup?.autoForward || {
                         enabled: false,
                         destination: null,
-                        deleteAfterForward: false,
+                        deleteAfterForward: true,
+                        captionMode: 'none',
                     },
                     photoUrl: `/api/groups/${id}/photo`,
                     accountIds: accIds,
@@ -10820,6 +10876,12 @@ app.get('/api/maintenance/config/raw', async (req, res) => {
     try {
         const config = loadConfig();
         if (config.telegram?.apiHash) config.telegram.apiHash = '••••••• (redacted)';
+        if (config.telegram?.bots) {
+            config.telegram.bots = config.telegram.bots.map((bot) => ({
+                ...bot,
+                tokenEncrypted: '••••••• (redacted)',
+            }));
+        }
         if (config.web?.passwordHash) config.web.passwordHash = '••••••• (redacted)';
         if (config.web?.password) config.web.password = '••••••• (redacted)';
         if (config.proxy?.password) config.proxy.password = '••••••• (redacted)';
@@ -10845,6 +10907,11 @@ app.get('/api/config', async (req, res) => {
             const hashSet = !!safe.telegram.apiHash;
             delete safe.telegram.apiHash;
             safe.telegram.apiHashSet = hashSet;
+            safe.telegram.bots = (safe.telegram.bots || []).map((bot) => ({
+                id: bot.id,
+                name: bot.name,
+                username: bot.username,
+            }));
         }
         if (safe.web) {
             delete safe.web.password;
@@ -11533,8 +11600,8 @@ app.put('/api/groups/:id', async (req, res) => {
                 filters: {
                     photos: true,
                     videos: true,
-                    files: true,
-                    links: true,
+                    files: false,
+                    links: false,
                     voice: false,
                     gifs: false,
                     stickers: false,
@@ -11542,8 +11609,12 @@ app.put('/api/groups/:id', async (req, res) => {
                 autoForward: {
                     enabled: false,
                     destination: null,
-                    deleteAfterForward: false,
-                    captionMode: 'copy',
+                    botId: null,
+                    destinationTopicId: null,
+                    protectContent: false,
+                    nsfwSpoiler: false,
+                    deleteAfterForward: true,
+                    captionMode: 'none',
                     captionPrefix: '',
                     captionSuffix: '',
                     captionReplacements: [],

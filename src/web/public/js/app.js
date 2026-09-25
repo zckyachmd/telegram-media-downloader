@@ -490,6 +490,8 @@ async function init() {
     // assign post-await because no inline onclick reaches them before
     // the operator clicks something.
     window.toggleFwdDelete = toggleFwdDelete;
+    window.toggleFwdProtect = toggleFwdProtect;
+    window.toggleFwdSpoiler = toggleFwdSpoiler;
     window.openDestinationPicker = openDestinationPicker;
     window.filterDialogs = filterDialogs;
     window.filterSidebarGroups = filterSidebarGroups;
@@ -576,6 +578,9 @@ async function init() {
     document
         .getElementById('save-api-credentials')
         ?.addEventListener('click', Settings.saveApiCredentials);
+    document
+        .getElementById('save-telegram-bot')
+        ?.addEventListener('click', Settings.saveTelegramBot);
     document
         .getElementById('change-password-btn')
         ?.addEventListener('click', Settings.changePassword);
@@ -3090,7 +3095,13 @@ async function openGroupSettings(groupId, groupName) {
 
     const fwdDeleteToggle = document.getElementById('fwd-delete-toggle');
     if (fwdDeleteToggle)
-        fwdDeleteToggle.classList.toggle('active', fwd.deleteAfterForward === true);
+        fwdDeleteToggle.classList.toggle('active', fwd.deleteAfterForward !== false);
+    document
+        .getElementById('fwd-protect-toggle')
+        ?.classList.toggle('active', fwd.protectContent === true);
+    document
+        .getElementById('fwd-spoiler-toggle')
+        ?.classList.toggle('active', fwd.nsfwSpoiler === true);
 
     // Topics
     const topics = group?.topics || {};
@@ -3101,8 +3112,24 @@ async function openGroupSettings(groupId, groupName) {
 
     const fwdDest = document.getElementById('fwd-destination');
     if (fwdDest) fwdDest.value = fwd.destination || '';
+    const fwdTopic = document.getElementById('fwd-destination-topic');
+    if (fwdTopic) fwdTopic.value = fwd.destinationTopicId || '';
+    try {
+        const bots = await api.get('/api/bots');
+        const botSelect = document.getElementById('fwd-bot-id');
+        if (botSelect) {
+            botSelect.innerHTML =
+                '<option value="">Use user account</option>' +
+                bots
+                    .map(
+                        (bot) =>
+                            `<option value="${escapeHtml(bot.id)}" ${bot.id === fwd.botId ? 'selected' : ''}>${escapeHtml(bot.name)} (@${escapeHtml(bot.username || bot.id)})</option>`,
+                    )
+                    .join('');
+        }
+    } catch {}
     const fwdCaptionMode = document.getElementById('fwd-caption-mode');
-    if (fwdCaptionMode) fwdCaptionMode.value = fwd.captionMode || 'copy';
+    if (fwdCaptionMode) fwdCaptionMode.value = fwd.captionMode || 'none';
     const fwdCaptionPrefix = document.getElementById('fwd-caption-prefix');
     if (fwdCaptionPrefix) fwdCaptionPrefix.value = fwd.captionPrefix || '';
     const fwdCaptionSuffix = document.getElementById('fwd-caption-suffix');
@@ -3396,15 +3423,25 @@ async function saveGroupSettings() {
     const fwdEnabled =
         document.getElementById('fwd-enable-toggle')?.classList.contains('active') ?? false;
     const fwdDelete =
-        document.getElementById('fwd-delete-toggle')?.classList.contains('active') ?? false;
+        document.getElementById('fwd-delete-toggle')?.classList.contains('active') ?? true;
     const fwdDest = document.getElementById('fwd-destination')?.value || '';
-    const fwdCaptionModeRaw = document.getElementById('fwd-caption-mode')?.value || 'copy';
+    const fwdBotId = document.getElementById('fwd-bot-id')?.value || '';
+    const fwdDestinationTopicId = parseInt(
+        document.getElementById('fwd-destination-topic')?.value,
+        10,
+    );
+    const fwdProtect =
+        document.getElementById('fwd-protect-toggle')?.classList.contains('active') ?? false;
+    const fwdSpoiler =
+        document.getElementById('fwd-spoiler-toggle')?.classList.contains('active') ?? false;
+    const fwdCaptionModeRaw = document.getElementById('fwd-caption-mode')?.value || 'none';
     const captionMode = ['copy', 'none', 'source'].includes(fwdCaptionModeRaw)
         ? fwdCaptionModeRaw
-        : 'copy';
+        : 'none';
     const captionPrefix = document.getElementById('fwd-caption-prefix')?.value || '';
     const captionSuffix = document.getElementById('fwd-caption-suffix')?.value || '';
-    const replacementsRaw = document.getElementById('fwd-caption-replacements')?.value?.trim() || '[]';
+    const replacementsRaw =
+        document.getElementById('fwd-caption-replacements')?.value?.trim() || '[]';
     let captionReplacements;
     try {
         captionReplacements = JSON.parse(replacementsRaw);
@@ -3466,6 +3503,12 @@ async function saveGroupSettings() {
         autoForward: {
             enabled: fwdEnabled,
             destination: fwdDest,
+            botId: fwdBotId || null,
+            destinationTopicId: Number.isFinite(fwdDestinationTopicId)
+                ? fwdDestinationTopicId
+                : null,
+            protectContent: fwdProtect,
+            nsfwSpoiler: fwdSpoiler,
             deleteAfterForward: fwdDelete,
             captionMode,
             captionPrefix,
@@ -3732,6 +3775,18 @@ function toggleFwdDelete(event) {
     event.stopPropagation();
     const toggle = document.getElementById('fwd-delete-toggle');
     if (toggle) toggle.classList.toggle('active');
+}
+
+function toggleFwdProtect(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    document.getElementById('fwd-protect-toggle')?.classList.toggle('active');
+}
+
+function toggleFwdSpoiler(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    document.getElementById('fwd-spoiler-toggle')?.classList.toggle('active');
 }
 
 async function openDestinationPicker() {
@@ -4198,7 +4253,6 @@ function setupFab() {
     };
     applyVisibility(getMonitorStatusLatest());
     subscribeMonitorStatus(applyVisibility);
-
 
     // Action catalogue keyed by id so the per-hint policy below can pick
     // and order without duplicating definitions.

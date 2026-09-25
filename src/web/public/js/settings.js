@@ -532,6 +532,7 @@ export async function loadSettings() {
         if (!isGuest) {
             // Accounts list rendered async (independent from main settings load)
             loadAccounts().catch(() => {});
+            loadTelegramBots().catch(() => {});
 
             // Maintenance panel — wire once. Idempotent because loadSettings can
             // run again on config_updated WS events.
@@ -1852,6 +1853,45 @@ export async function loadAccounts() {
         });
     } catch (e) {
         container.innerHTML = `<p class="text-red-400 text-sm">${escapeHtml(i18nTf('settings.accounts.load_failed', { msg: e.message }, `Failed to load accounts: ${e.message}`))}</p>`;
+    }
+}
+
+export async function loadTelegramBots() {
+    const container = document.getElementById('telegram-bots-list');
+    if (!container) return;
+    const bots = await api.get('/api/bots');
+    container.innerHTML = bots.length
+        ? bots
+              .map(
+                  (
+                      bot,
+                  ) => `<div class="flex items-center justify-between bg-tg-bg/40 rounded-lg p-3">
+                    <div class="text-sm text-tg-text"><div>${escapeHtml(bot.name)} <span class="text-tg-textSecondary">@${escapeHtml(bot.username || bot.id)}</span></div><span class="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full text-[11px] bg-emerald-500/15 text-emerald-400"><i class="ri-checkbox-circle-line"></i>${bot.verified ? 'Connected / verified' : 'Saved — verify again'}</span></div>
+                    <button class="text-xs text-red-400" data-remove-bot="${escapeHtml(bot.id)}">Remove</button>
+                </div>`,
+              )
+              .join('')
+        : '<p class="text-tg-textSecondary text-sm">No BotFather bots configured.</p>';
+    container.querySelectorAll('[data-remove-bot]').forEach((button) => {
+        button.addEventListener('click', async () => {
+            await api.delete(`/api/bots/${encodeURIComponent(button.dataset.removeBot)}`);
+            loadTelegramBots();
+        });
+    });
+}
+
+export async function saveTelegramBot() {
+    const token = document.getElementById('setting-bot-token')?.value.trim();
+    const name = document.getElementById('setting-bot-name')?.value.trim();
+    if (!token) return showToast('BotFather token required', 'error');
+    try {
+        await api.post('/api/bots', { token, name });
+        document.getElementById('setting-bot-token').value = '';
+        document.getElementById('setting-bot-name').value = '';
+        await loadTelegramBots();
+        showToast('Bot verified and saved', 'success');
+    } catch (e) {
+        showToast(e.message, 'error');
     }
 }
 

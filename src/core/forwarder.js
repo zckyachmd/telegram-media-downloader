@@ -7,13 +7,17 @@ import fs from 'fs/promises';
 import path from 'path';
 import { Api } from 'telegram';
 import { colorize } from '../cli/colors.js';
+import { TelegramBotManager } from './telegram-bot.js';
 
 export class AutoForwarder {
     constructor(client, config, accountManager = null) {
         this.client = client;
         this.config = config;
         this.accountManager = accountManager;
+        this.botManager = new TelegramBotManager(config);
         this.storageChannelId = null; // Cache for the single storage channel
+        this._sendChain = Promise.resolve();
+        this._lastSendAt = 0;
     }
 
     /**
@@ -26,7 +30,9 @@ export class AutoForwarder {
         // A SHA-256 duplicate can come from a different source group. Keep
         // the shared local file, but do not post it to the destination again.
         if (deduped) {
-            console.log(colorize(`⏭️  [AutoForward] Skipping duplicate for ${groupName}...`, 'gray'));
+            console.log(
+                colorize(`⏭️  [AutoForward] Skipping duplicate for ${groupName}...`, 'gray'),
+            );
             return;
         }
 
@@ -37,6 +43,24 @@ export class AutoForwarder {
         }
 
         const settings = groupConfig.autoForward;
+        this.botManager.config = this.config;
+
+        const bot = settings.botId ? this.botManager.get(settings.botId) : null;
+        if (settings.botId && !bot)
+            throw new Error(`Configured Telegram bot not found: ${settings.botId}`);
+        if (settings.protectContent === true && !bot) {
+            throw new Error('Protected forwarding requires a BotFather bot, not a user account');
+        }
+        if (
+            bot &&
+            (!settings.destination ||
+                settings.destination === 'storage' ||
+                settings.destination === 'me')
+        ) {
+            throw new Error(
+                'Bot forwarding requires an explicit Telegram destination ID or @username',
+            );
+        }
 
         // Use per-group forward account if configured
         const fwdClient =
@@ -48,7 +72,9 @@ export class AutoForwarder {
 
         try {
             // 2. Resolve Destination
-            let targetPeer = await this.resolveDestination(settings.destination, fwdClient);
+            let targetPeer = bot
+                ? settings.destination
+                : await this.resolveDestination(settings.destination, fwdClient);
             if (!targetPeer) {
                 console.log(
                     colorize(`⚠️  [AutoForward] Could not resolve destination. Skipping.`, 'yellow'),
@@ -59,7 +85,7 @@ export class AutoForwarder {
             // 3. Build the destination caption from per-group forwarding settings.
             const captionMode = ['copy', 'none', 'source'].includes(settings.captionMode)
                 ? settings.captionMode
-                : 'copy';
+                : 'none';
             let caption = captionMode === 'none' ? '' : message?.message || message?.text || '';
             if (captionMode === 'source') {
                 const msgId = message?.id;
@@ -82,16 +108,31 @@ export class AutoForwarder {
                     // Ignore one invalid rule and keep forwarding the media.
                 }
             }
-            caption = `${settings.captionPrefix || ''}${caption}${settings.captionSuffix || ''}`;
+            if (captionMode !== 'none') {
+                caption = `${settings.captionPrefix || ''}${caption}${settings.captionSuffix || ''}`;
+            } else {
+                caption = '';
+            }
 
             // 4. Upload & Send
             // We use sendFile to bypass restricted content forwarding
-            const sentMsg = await fwdClient.sendFile(targetPeer, {
-                file: filePath,
-                caption: caption,
-                forceDocument: false,
-                workers: 1, // Safer for automated uploads
-            });
+            const sentMsg = await this._sendWithThrottle(() =>
+                bot
+                    ? bot.sendFile(targetPeer, filePath, {
+                          caption,
+                          messageThreadId: Number.isFinite(Number(settings.destinationTopicId))
+                              ? Number(settings.destinationTopicId)
+                              : undefined,
+                          protectContent: settings.protectContent === true,
+                          hasSpoiler: settings.nsfwSpoiler === true,
+                      })
+                    : fwdClient.sendFile(targetPeer, {
+                          file: filePath,
+                          caption,
+                          forceDocument: false,
+                          workers: 1,
+                      }),
+            );
 
             // GramJS returns the new message; surface its TG message-id in the log
             // so operators can trace the destination copy back from the dashboard.
@@ -127,6 +168,22 @@ export class AutoForwarder {
         } catch (error) {
             console.log(colorize(`❌ [AutoForward] Error: ${error.message}`, 'red'));
         }
+    }
+
+    async _sendWithThrottle(send) {
+        const run = this._sendChain.then(async () => {
+            const intervalMs = Math.max(
+                1000,
+                Number(this.config.advanced?.forwarding?.minIntervalMs) || 1500,
+            );
+            const waitMs = Math.max(0, intervalMs - (Date.now() - this._lastSendAt));
+            if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+            this._lastSendAt = Date.now();
+            return send();
+        });
+        // ponytail: one global queue keeps burst traffic conservative; split by destination only if throughput becomes necessary.
+        this._sendChain = run.catch(() => {});
+        return run;
     }
 
     /**

@@ -1,6 +1,6 @@
 /**
- * Telegram Bot Control
- * Handles commands via Telegram chat to control the downloader.
+ * User-account control commands.
+ * This is not a BotFather Bot API client; protected forwarding uses telegram-bot.js.
  */
 
 import { NewMessage } from 'telegram/events/index.js';
@@ -14,9 +14,7 @@ export class BotControl {
     }
 
     start() {
-        console.log(
-            '🤖 Bot Control Active. Send /status to your account (Saved Messages) or the bot account.',
-        );
+        console.log('🤖 User-account control active. Send /status to Saved Messages.');
 
         this.client.addEventHandler(async (event) => {
             const message = event.message;

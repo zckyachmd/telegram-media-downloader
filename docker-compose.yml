@@ -23,6 +23,7 @@ services:
     environment:
       - NODE_ENV=production
       - TZ=${TZ:-UTC}
+      - TGDL_DATA_DIR=/app/data
       - TGDL_DEBUG=${TGDL_DEBUG:-}
       # V8 heap ceiling. Default 8 GiB so a 1M-row library doesn't trip
       # `FATAL ERROR: Reached heap limit Allocation failed` inside
