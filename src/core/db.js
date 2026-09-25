@@ -34,7 +34,9 @@ export function getDb() {
 
     // Performance tuning
     db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
+    // FULL is slightly slower but protects the local bind-mounted database
+    // from losing committed pages during container/host restarts.
+    db.pragma('synchronous = FULL');
     // 64 MB page cache (default ~2 MB). Keeps hot pages in memory so
     // repeated gallery/stats queries hit RAM instead of disk.
     db.pragma('cache_size = -64000');

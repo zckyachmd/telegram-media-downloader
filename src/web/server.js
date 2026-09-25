@@ -2694,9 +2694,15 @@ app.post('/api/history', async (req, res) => {
         _historyJobs.set(jobId, job);
         _activeBackfillsByGroup.set(groupKey, jobId);
 
+        let lastProgressBroadcastAt = 0;
         const onProgress = (s) => {
             job.processed = s.processed;
             job.downloaded = s.downloaded;
+            const now = Date.now();
+            // Backfill emits once per Telegram message. Throttle the socket
+            // stream; the job state remains current for the API snapshot.
+            if (now - lastProgressBroadcastAt < 500 && s.processed % 25 !== 0) return;
+            lastProgressBroadcastAt = now;
             broadcast({
                 type: 'history_progress',
                 jobId,
@@ -11728,9 +11734,13 @@ async function _spawnInternalBackfill({
     };
     _historyJobs.set(jobId, job);
     _activeBackfillsByGroup.set(groupKey, jobId);
+    let lastProgressBroadcastAt = 0;
     const onProgress = (s) => {
         job.processed = s.processed;
         job.downloaded = s.downloaded;
+        const now = Date.now();
+        if (now - lastProgressBroadcastAt < 500 && s.processed % 25 !== 0) return;
+        lastProgressBroadcastAt = now;
         broadcast({
             type: 'history_progress',
             jobId,
