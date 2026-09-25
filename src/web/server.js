@@ -4136,6 +4136,7 @@ app.get('/api/dialogs', async (req, res) => {
                         videos: true,
                         files: false,
                         links: false,
+                        urls: false,
                         voice: false,
                         gifs: false,
                         stickers: false,
