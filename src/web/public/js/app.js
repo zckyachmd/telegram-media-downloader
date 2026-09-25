@@ -3101,6 +3101,15 @@ async function openGroupSettings(groupId, groupName) {
 
     const fwdDest = document.getElementById('fwd-destination');
     if (fwdDest) fwdDest.value = fwd.destination || '';
+    const fwdCaptionMode = document.getElementById('fwd-caption-mode');
+    if (fwdCaptionMode) fwdCaptionMode.value = fwd.captionMode || 'copy';
+    const fwdCaptionPrefix = document.getElementById('fwd-caption-prefix');
+    if (fwdCaptionPrefix) fwdCaptionPrefix.value = fwd.captionPrefix || '';
+    const fwdCaptionSuffix = document.getElementById('fwd-caption-suffix');
+    if (fwdCaptionSuffix) fwdCaptionSuffix.value = fwd.captionSuffix || '';
+    const fwdCaptionReplacements = document.getElementById('fwd-caption-replacements');
+    if (fwdCaptionReplacements)
+        fwdCaptionReplacements.value = JSON.stringify(fwd.captionReplacements || [], null, 2);
 
     // Populate account pickers
     try {
@@ -3389,6 +3398,26 @@ async function saveGroupSettings() {
     const fwdDelete =
         document.getElementById('fwd-delete-toggle')?.classList.contains('active') ?? false;
     const fwdDest = document.getElementById('fwd-destination')?.value || '';
+    const fwdCaptionModeRaw = document.getElementById('fwd-caption-mode')?.value || 'copy';
+    const captionMode = ['copy', 'none', 'source'].includes(fwdCaptionModeRaw)
+        ? fwdCaptionModeRaw
+        : 'copy';
+    const captionPrefix = document.getElementById('fwd-caption-prefix')?.value || '';
+    const captionSuffix = document.getElementById('fwd-caption-suffix')?.value || '';
+    const replacementsRaw = document.getElementById('fwd-caption-replacements')?.value?.trim() || '[]';
+    let captionReplacements;
+    try {
+        captionReplacements = JSON.parse(replacementsRaw);
+        if (!Array.isArray(captionReplacements)) throw new Error('must be an array');
+        captionReplacements = captionReplacements.map((rule) => {
+            if (typeof rule?.find !== 'string' || typeof rule?.replace !== 'string')
+                throw new Error('each rule needs find and replace');
+            return { find: rule.find, replace: rule.replace, regex: rule.regex === true };
+        });
+    } catch (e) {
+        showToast(`Invalid caption replacements JSON: ${e.message}`, 'error');
+        return;
+    }
 
     // Collect account assignments
     const monitorAccount = document.getElementById('monitor-account')?.value || '';
@@ -3438,6 +3467,10 @@ async function saveGroupSettings() {
             enabled: fwdEnabled,
             destination: fwdDest,
             deleteAfterForward: fwdDelete,
+            captionMode,
+            captionPrefix,
+            captionSuffix,
+            captionReplacements,
         },
         topics: {
             enabled: topicsEnabled,

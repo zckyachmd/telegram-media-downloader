@@ -1,18 +1,13 @@
 # Compose file for Telegram Media Downloader.
 #
-# Defaults to the prebuilt multi-arch image from GitHub Container Registry.
-# `pull_policy: always` ensures `docker compose up -d` grabs the newest
-# release each time — without this, an older locally-cached image wins and
-# manifests as `Cannot find module '/app/src/web/server.js'` after upgrades.
-#
-# To build from source instead (for local dev), comment out `image:` +
-# `pull_policy:` and uncomment `build:`.
+# Build locally so the dedup-before-forward guard is included in the running
+# container. Run `docker compose build --pull` when deliberately updating.
 
 services:
   telegram-downloader:
     image: ghcr.io/botnick/telegram-media-downloader:latest
-    pull_policy: always
-    # build: .
+    pull_policy: build
+    build: .
     container_name: telegram-downloader
     restart: unless-stopped
     ports:
@@ -137,7 +132,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${TGDL_MEM_LIMIT:-8g}
+          cpus: '${TGDL_CPU_LIMIT:-2.0}'
+          memory: ${TGDL_MEM_LIMIT:-2g}
         reservations:
           memory: 256m
     # Log rotation — without this, json-file logs grow forever and the host
@@ -298,6 +294,7 @@ services:
         # limit env var so the CPU variant's TGDL_FACES_MEM_LIMIT stays
         # smaller on the same host's compose.yml.
         limits:
+          cpus: '${TGDL_FACES_CUDA_CPU_LIMIT:-1.0}'
           memory: ${TGDL_FACES_CUDA_MEM_LIMIT:-3g}
         reservations:
           memory: 1g
@@ -355,7 +352,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${TGDL_FACES_MEM_LIMIT:-2g}
+          cpus: '${TGDL_FACES_CPU_LIMIT:-1.0}'
+          memory: ${TGDL_FACES_MEM_LIMIT:-1536m}
         reservations:
           memory: 512m
     logging:
@@ -381,6 +379,11 @@ services:
     image: willfarrell/autoheal:1.2.0
     container_name: telegram-downloader-autoheal
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: 128m
     # autoheal only needs the docker socket — no inbound network. `none`
     # makes a hypothetical RCE in autoheal unable to phone home.
     network_mode: none
@@ -430,6 +433,11 @@ services:
     profiles: ["auto-update"]
     container_name: telegram-downloader-updater
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '0.10'
+          memory: 128m
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     environment:

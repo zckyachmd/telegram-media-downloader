@@ -21,7 +21,14 @@ export class AutoForwarder {
      * @param {Object} downloadInfo - From downloader 'download_complete' event
      */
     async process(downloadInfo) {
-        const { filePath, groupId, groupName, message } = downloadInfo;
+        const { filePath, groupId, groupName, message, deduped } = downloadInfo;
+
+        // A SHA-256 duplicate can come from a different source group. Keep
+        // the shared local file, but do not post it to the destination again.
+        if (deduped) {
+            console.log(colorize(`⏭️  [AutoForward] Skipping duplicate for ${groupName}...`, 'gray'));
+            return;
+        }
 
         // 1. Check Group Config
         const groupConfig = this.config.groups.find((g) => String(g.id) === String(groupId));
@@ -49,25 +56,33 @@ export class AutoForwarder {
                 return;
             }
 
-            // 3. Prepare Caption with Message Link
-            let caption = message?.message || message?.text || '';
-
-            // Generate message link
-            // Format: t.me/c/CHANNEL_ID/MESSAGE_ID (private) or t.me/USERNAME/MESSAGE_ID (public)
-            let messageLink = '';
-            const msgId = message?.id;
-            if (msgId && groupId) {
-                // For private channels: use /c/ format with positive ID
+            // 3. Build the destination caption from per-group forwarding settings.
+            const captionMode = ['copy', 'none', 'source'].includes(settings.captionMode)
+                ? settings.captionMode
+                : 'copy';
+            let caption = captionMode === 'none' ? '' : message?.message || message?.text || '';
+            if (captionMode === 'source') {
+                const msgId = message?.id;
                 const cleanId = String(groupId).replace(/^-100/, '');
-                messageLink = `https://t.me/c/${cleanId}/${msgId}`;
+                caption =
+                    msgId && String(groupId).startsWith('-100')
+                        ? `Source: [${groupName}](https://t.me/c/${cleanId}/${msgId})`
+                        : `Source: ${groupName}`;
             }
-
-            // Add source attribution with clickable link
-            if (messageLink) {
-                caption += `\n\n📌 Source: [${groupName}](${messageLink})`;
-            } else {
-                caption += `\n\n📌 Source: **${groupName}**`;
+            const replacements = Array.isArray(settings.captionReplacements)
+                ? settings.captionReplacements
+                : [];
+            for (const rule of replacements) {
+                if (typeof rule?.find !== 'string' || typeof rule?.replace !== 'string') continue;
+                try {
+                    caption = rule.regex
+                        ? caption.replace(new RegExp(rule.find, 'g'), rule.replace)
+                        : caption.split(rule.find).join(rule.replace);
+                } catch {
+                    // Ignore one invalid rule and keep forwarding the media.
+                }
             }
+            caption = `${settings.captionPrefix || ''}${caption}${settings.captionSuffix || ''}`;
 
             // 4. Upload & Send
             // We use sendFile to bypass restricted content forwarding
@@ -129,18 +144,17 @@ export class AutoForwarder {
                 try {
                     const id = BigInt(destination);
 
-                    // Primary: cheap, returns InputPeer if GramJS already has the entity cached.
+                    // Prefer the full entity so GramJS carries the current peer metadata.
                     try {
-                        return await client.getInputEntity(id);
+                        const entity = await client.getEntity(id);
+                        if (entity) return entity;
                     } catch {
                         /* fall through */
                     }
 
-                    // Secondary: heavier — scans dialogs and resolves usernames/peers, often
-                    // succeeds where getInputEntity fails (e.g. channel never seen on this client).
+                    // Secondary: use the cached InputPeer when the full entity is unavailable.
                     try {
-                        const entity = await client.getEntity(id);
-                        if (entity) return entity;
+                        return await client.getInputEntity(id);
                     } catch {
                         /* fall through */
                     }

@@ -431,6 +431,22 @@
                                         </button>
                                     </div>
                                 </div>
+                                <div>
+                                    <label class="block text-tg-textSecondary text-[11px] mb-1">Caption mode</label>
+                                    <select id="fwd-caption-mode" class="tg-input text-sm py-2 w-full">
+                                        <option value="copy">Copy original caption</option>
+                                        <option value="none">Remove caption</option>
+                                        <option value="source">Source link only</option>
+                                    </select>
+                                </div>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                    <input type="text" id="fwd-caption-prefix" class="tg-input text-sm py-2" placeholder="Caption prefix (optional)">
+                                    <input type="text" id="fwd-caption-suffix" class="tg-input text-sm py-2" placeholder="Caption suffix (optional)">
+                                </div>
+                                <details class="rounded border border-tg-border/40 p-2">
+                                    <summary class="text-xs text-tg-textSecondary cursor-pointer">Advanced replacements (JSON)</summary>
+                                    <textarea id="fwd-caption-replacements" rows="4" class="tg-input text-xs mt-2 w-full font-mono" placeholder='[{"find":"old","replace":"new","regex":false}]'></textarea>
+                                </details>
                                 <label onclick="toggleFwdDelete(event)" class="flex items-center justify-between py-1.5 cursor-pointer">
                                     <span class="text-tg-text text-xs" data-i18n="group.fwd.delete_after">Delete after forward</span>
                                     <div class="tg-toggle" id="fwd-delete-toggle"></div>

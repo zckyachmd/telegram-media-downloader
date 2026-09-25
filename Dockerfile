@@ -12,6 +12,9 @@
 FROM node:24.16.0-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 RUN npm ci --omit=dev --no-audit --no-fund
 
 FROM node:24.16.0-bookworm-slim AS runtime
@@ -50,8 +53,11 @@ ENV NODE_ENV=production \
 # file or directory". libstdc++ is part of the base image, no install needed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        tini gosu ffmpeg procps \
-        intel-media-va-driver i965-va-driver vainfo \
+        tini gosu ffmpeg procps vainfo \
+    && if [ "$(dpkg --print-architecture)" = "amd64" ]; then \
+        apt-get install -y --no-install-recommends \
+            intel-media-va-driver i965-va-driver; \
+    fi \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -117,6 +117,7 @@ import {
 import {
     getSidecarStatus as getSeekbarSidecarStatus,
     refreshSidecar as refreshSeekbarSidecar,
+    stopSidecar as stopSeekbarSidecar,
     setBroadcast as setSeekbarBroadcast,
     SIDECAR_VERSION as SEEKBAR_SIDECAR_VERSION,
     startSidecar as startSeekbarSidecar,
@@ -2628,7 +2629,15 @@ app.post('/api/history', async (req, res) => {
                     gifs: false,
                     stickers: false,
                 },
-                autoForward: { enabled: false, destination: null, deleteAfterForward: false },
+                autoForward: {
+                    enabled: false,
+                    destination: null,
+                    deleteAfterForward: false,
+                    captionMode: 'copy',
+                    captionPrefix: '',
+                    captionSuffix: '',
+                    captionReplacements: [],
+                },
                 trackUsers: { enabled: false, users: [] },
                 topics: { enabled: false, ids: [] },
             };
@@ -11393,12 +11402,16 @@ app.post('/api/config', async (req, res) => {
         // either way.
         if (req.body.advanced?.seekbar) {
             try {
-                refreshSeekbarSidecar().catch((e) =>
-                    console.warn(
-                        '[seekbar-sidecar] config-change refresh failed:',
-                        e?.message || e,
-                    ),
-                );
+                if (newConfig?.advanced?.seekbar?.enabled === false) {
+                    stopSeekbarSidecar();
+                } else {
+                    refreshSeekbarSidecar().catch((e) =>
+                        console.warn(
+                            '[seekbar-sidecar] config-change refresh failed:',
+                            e?.message || e,
+                        ),
+                    );
+                }
             } catch (e) {
                 console.warn('[seekbar-sidecar] config-change refresh threw:', e?.message || e);
             }
@@ -11520,7 +11533,15 @@ app.put('/api/groups/:id', async (req, res) => {
                     gifs: false,
                     stickers: false,
                 },
-                autoForward: { enabled: false, destination: null, deleteAfterForward: false },
+                autoForward: {
+                    enabled: false,
+                    destination: null,
+                    deleteAfterForward: false,
+                    captionMode: 'copy',
+                    captionPrefix: '',
+                    captionSuffix: '',
+                    captionReplacements: [],
+                },
                 trackUsers: { enabled: false, users: [] },
                 topics: { enabled: false, ids: [] },
             };
@@ -12601,9 +12622,13 @@ ${tip}
     // the status either way.
     try {
         setSeekbarBroadcast(broadcast);
-        startSeekbarSidecar().catch((e) => {
-            console.warn('[seekbar-sidecar] start failed:', e?.message || e);
-        });
+        if (loadConfig()?.advanced?.seekbar?.enabled !== false) {
+            startSeekbarSidecar().catch((e) => {
+                console.warn('[seekbar-sidecar] start failed:', e?.message || e);
+            });
+        } else {
+            stopSeekbarSidecar();
+        }
     } catch (e) {
         console.warn('[seekbar-sidecar] wiring failed:', e?.message || e);
     }

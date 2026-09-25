@@ -12,6 +12,11 @@ services:
     # build: .                # uncomment for local builds
     container_name: tgdl-seekbar
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512m
     ports:
       - "8089:8089"
     environment:
