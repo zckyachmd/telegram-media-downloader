@@ -637,7 +637,7 @@ const DEFAULT_FILTERS = {
     audio: false,
     gifs: false,
     stickers: false, // Default false for stickers
-    urls: true,
+    urls: false,
 };
 
 // In-process pub/sub. Replaces the fs.watch + 100ms debounce that the old
