@@ -1653,6 +1653,7 @@ export function setupAutoSave() {
     // attribute (newer modules). The closure bundles both checks.
     const isAutosaveInput = (t) => {
         if (!t) return false;
+        if (t.id === 'setting-api-id' || t.id === 'setting-api-hash') return false;
         if (t.id && t.id.startsWith('setting-')) return true;
         if (typeof t.closest === 'function' && t.closest('[data-autosave]')) return true;
         return false;
