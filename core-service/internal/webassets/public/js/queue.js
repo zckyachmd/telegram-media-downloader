@@ -15,6 +15,7 @@
 
 import { ws } from './ws.js';
 import { api } from './api.js';
+import { subscribe as subscribeMonitorStatus } from './monitor-status.js';
 import { showToast, escapeHtml, formatBytes, getFileIcon } from './utils.js';
 import { t as i18nT, tf as i18nTf } from './i18n.js';
 import { getGroupName } from './store.js';
@@ -121,6 +122,7 @@ let globalPaused = false;
 let engineRunning = false;
 let maxSpeedConfig = null;
 let forwardQueueData = {};
+let monitorCounts = { queue: 0, active: 0, forward: 0 };
 let forwardOnly = false;
 
 // View state — survives across navigations to the same page.
@@ -812,13 +814,14 @@ function _chipCounts() {
     for (const j of store.values()) {
         if (j.deduped === true) dupe += 1;
     }
-    const active = statusCounts.get('active') || 0;
-    const queued = statusCounts.get('queued') || 0;
+    const active = monitorCounts.active;
+    const queued = monitorCounts.queue;
     return {
-        current: active + queued + (forwardQueueData.pending || 0) + (forwardQueueData.active || 0),
+        current: active + queued + monitorCounts.forward,
         all: store.size,
         active,
         queued,
+        forwarding: monitorCounts.forward,
         paused: statusCounts.get('paused') || 0,
         failed: statusCounts.get('failed') || 0,
         done: statusCounts.get('done') || 0,
@@ -1720,6 +1723,15 @@ export function initQueue() {
     if (_wired) return;
     _wired = true;
     ws.on('*', handleWs);
+    subscribeMonitorStatus((status) => {
+        if (!status) return;
+        monitorCounts = {
+            queue: Number(status.queue) || 0,
+            active: Number(status.active) || 0,
+            forward: Number(status.forward) || 0,
+        };
+        renderChips();
+    });
     // Load the snapshot eagerly so the bottom-nav badge is accurate
     // before the user ever opens the page.
     loadSnapshot();
