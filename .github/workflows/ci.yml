@@ -13,6 +13,7 @@ jobs:
   go:
     name: Go application
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: core-service
@@ -33,6 +34,46 @@ jobs:
       - name: Launcher from outside the checkout
         working-directory: /tmp
         run: '"${{ github.workspace }}/runner.sh" version'
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - name: Install process E2E dependencies
+        timeout-minutes: 3
+        working-directory: .
+        run: |
+          python -m pip install --timeout 30 --retries 2 pyftpdlib==2.2.0 pyOpenSSL cryptography websocket-client
+      - name: Native process end-to-end checks
+        timeout-minutes: 5
+        working-directory: .
+        run: |
+          python tests/e2e/ws_sessions.py
+          python tests/e2e/http_policy.py
+          python tests/e2e/tgdb_cli.py
+          python tests/e2e/ambient_rescue.py
+          python tests/e2e/cluster_live_process.py
+          python tests/e2e/ftp_interop.py
+      - name: Install FFmpeg for media E2E
+        timeout-minutes: 3
+        run: |
+          command -v ffmpeg && command -v ffprobe && exit 0
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get install -y ffmpeg
+      - name: Native media end-to-end checks
+        timeout-minutes: 2
+        working-directory: .
+        run: |
+          python tests/e2e/media.py
+      - name: Install browser E2E dependencies
+        timeout-minutes: 5
+        working-directory: .
+        run: |
+          python -m pip install --timeout 30 --retries 2 playwright
+          python -m playwright install --with-deps chromium
+      - name: Browser against the running production server
+        timeout-minutes: 3
+        working-directory: .
+        run: |
+          python tests/e2e/browser.py
 
   cross-build:
     name: Server ${{ matrix.target }}
@@ -51,3 +92,17 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: CGO_ENABLED=0 GOOS=${TARGET%/*} GOARCH=${TARGET#*/} GOARM=7 go -C core-service build -trimpath -o /dev/null ./cmd/tgdl-server
+
+  ui:
+    name: Browser regression checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install playwright
+      - run: python -m playwright install --with-deps chromium
+      - run: python tests/ui/login_accessibility.py
+      - run: python tests/ui/forum_routes.py
