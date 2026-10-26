@@ -135,7 +135,9 @@ function loadEnglish() {
         return Promise.resolve(_en);
     }
     if (!_enLoading) {
-        _enLoading = fetch('/locales/en.json')
+        const devVersion = document.querySelector('meta[name="tgdl-dev-assets"]')?.content;
+        const localeURL = devVersion ? `/locales/en.json?v=${encodeURIComponent(devVersion)}` : '/locales/en.json';
+        _enLoading = fetch(localeURL)
             .then((r) => (r.ok ? r.json() : {}))
             .catch(() => ({}))
             .then((d) => {

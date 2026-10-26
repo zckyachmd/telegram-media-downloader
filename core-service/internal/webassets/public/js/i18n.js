@@ -11,6 +11,12 @@ let dict = {};
 let active = 'en';
 let listeners = new Set();
 
+function localeURL(lang) {
+    const devVersion = document.querySelector('meta[name="tgdl-dev-assets"]')?.content;
+    const path = `/locales/${encodeURIComponent(lang)}.json`;
+    return devVersion ? `${path}?v=${encodeURIComponent(devVersion)}` : path;
+}
+
 function detect() {
     const stored = localStorage.getItem(LS_KEY);
     if (stored && SUPPORTED.includes(stored) && stored !== 'auto') return stored;
@@ -26,7 +32,7 @@ async function load(lang) {
         return;
     }
     try {
-        const res = await fetch(`/locales/${encodeURIComponent(lang)}.json`);
+        const res = await fetch(localeURL(lang));
         if (!res.ok) throw new Error('not found');
         dict = await res.json();
     } catch {

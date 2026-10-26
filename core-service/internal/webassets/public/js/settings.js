@@ -892,6 +892,7 @@ const ADVANCED_DEFAULTS = {
         scalerIntervalSec: 5,
         idleSleepMs: 200,
     },
+    forwarder: { concurrency: 1, queueSize: 256, intervalSec: 0, floodWaitAttempts: 3 },
     history: {
         backpressureCap: 500,
         backpressureMaxWaitMs: 15 * 60 * 1000,
@@ -964,6 +965,12 @@ export function loadAdvanced(config) {
     set('setting-adv-max-concurrency', dl.maxConcurrency);
     set('setting-adv-scaler-sec', dl.scalerIntervalSec);
     set('setting-adv-idle-sleep-ms', dl.idleSleepMs);
+
+    const f = { ...ADVANCED_DEFAULTS.forwarder, ...(adv.forwarder || {}) };
+    set('setting-adv-forward-concurrency', f.concurrency);
+    set('setting-adv-forward-queue-size', f.queueSize);
+    set('setting-adv-forward-interval-sec', f.intervalSec);
+    set('setting-adv-forward-flood-attempts', f.floodWaitAttempts);
 
     const h = { ...ADVANCED_DEFAULTS.history, ...(adv.history || {}) };
     set('setting-adv-backpressure', h.backpressureCap);
@@ -1141,6 +1148,12 @@ function gatherAdvanced() {
                 ADVANCED_DEFAULTS.downloader.scalerIntervalSec,
             ),
             idleSleepMs: num('setting-adv-idle-sleep-ms', ADVANCED_DEFAULTS.downloader.idleSleepMs),
+        },
+        forwarder: {
+            concurrency: num('setting-adv-forward-concurrency', ADVANCED_DEFAULTS.forwarder.concurrency),
+            queueSize: num('setting-adv-forward-queue-size', ADVANCED_DEFAULTS.forwarder.queueSize),
+            intervalSec: num('setting-adv-forward-interval-sec', ADVANCED_DEFAULTS.forwarder.intervalSec),
+            floodWaitAttempts: num('setting-adv-forward-flood-attempts', ADVANCED_DEFAULTS.forwarder.floodWaitAttempts),
         },
         history: {
             backpressureCap: num(

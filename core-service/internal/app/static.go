@@ -31,8 +31,12 @@ func weakETag(data []byte) string {
 	return `W/"` + strconv.FormatInt(int64(len(data)), 16) + `-` + base64.RawStdEncoding.EncodeToString(sum[:]) + `"`
 }
 
-func newStaticHandler(files fs.FS) http.Handler {
+func newStaticHandler(files fs.FS, devMode bool) http.Handler {
 	var cache sync.Map
+	assetVersion := version.AppVersion
+	if devMode {
+		assetVersion = "dev-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if (r.Method != "GET" && r.Method != "HEAD") || strings.HasPrefix(r.URL.Path, "/api/") || files == nil {
 			writeNotFound(w, r)
@@ -43,6 +47,9 @@ func newStaticHandler(files fs.FS) http.Handler {
 			name = "index.html"
 		}
 		setStaticCacheHeaders(w, name, r.URL.Query().Get("v") != "")
+		if devMode {
+			w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		}
 		if strings.Contains(r.URL.Path, "..") && (strings.HasPrefix(r.URL.Path, "/js/") || strings.HasPrefix(r.URL.Path, "/css/") || strings.HasPrefix(r.URL.Path, "/locales/") || strings.HasPrefix(r.URL.Path, "/icons/")) {
 			if strings.HasPrefix(r.URL.Path, "/js/") {
 				w.Header().Set("Cache-Control", "public, max-age=3600")
@@ -65,7 +72,11 @@ func newStaticHandler(files fs.FS) http.Handler {
 			case "index.html", "login.html", "setup-needed.html", "add-account.html":
 				body.rewritten = true
 				body.contentType = "text/html; charset=utf-8"
-				body.data = htmlAsset.ReplaceAll(data, []byte(`${1}="${2}?v=`+version.AppVersion+`"`))
+				body.data = htmlAsset.ReplaceAll(data, []byte(`${1}="${2}?v=`+assetVersion+`"`))
+				if devMode {
+					marker := []byte(`<meta name="tgdl-dev-assets" content="` + assetVersion + `">`)
+					body.data = bytes.Replace(body.data, []byte("<head>"), append([]byte("<head>"), marker...), 1)
+				}
 			}
 			if strings.HasPrefix(name, "js/") && strings.HasSuffix(name, ".js") {
 				body.rewritten = true
@@ -75,7 +86,7 @@ func newStaticHandler(files fs.FS) http.Handler {
 					if !bytes.Equal(parts[2], parts[4]) {
 						return match
 					}
-					return []byte(string(parts[1]) + string(parts[2]) + string(parts[3]) + "?v=" + version.AppVersion + string(parts[4]))
+					return []byte(string(parts[1]) + string(parts[2]) + string(parts[3]) + "?v=" + assetVersion + string(parts[4]))
 				})
 			}
 			if name == "CHANGELOG.md" {

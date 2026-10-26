@@ -127,6 +127,10 @@ self.addEventListener('fetch', (event) => {
     }
     if (url.origin !== self.location.origin) return;
 
+    // Local dev servers rebuild their embedded assets without changing the
+    // release version. Let dev responses bypass the offline cache entirely.
+    if (self.location.hostname === 'localhost' || self.location.hostname === '127.0.0.1') return;
+
     if (isBypass(url)) return;
 
     // Navigation requests — network-first so a deploy reflects on next

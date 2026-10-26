@@ -45,13 +45,12 @@ const RENDER_COALESCE_MS = 60; // collapse WS bursts into one rAF tick
 // downloader flagged as duplicates) — surfaces the rows that produced no
 // new bytes on disk, so the operator can see "what got skipped today".
 const STATUS_FILTERS = [
-    // Default view: everything that still has work to do. Finished rows
-    // (done / failed / duplicates) are one tap away.
+    // Active downloads plus durable forward jobs are shown in the Active view.
     {
         id: 'current',
         i18n: 'queue.chip.current',
         fallback: 'Active',
-        match: (j) => j.status === 'active' || j.status === 'queued' || j.status === 'paused',
+        match: (j) => j.status === 'active' || j.status === 'queued',
     },
     {
         id: 'failed',
@@ -63,11 +62,18 @@ const STATUS_FILTERS = [
     { id: 'all', i18n: 'queue.chip.all', fallback: 'All', match: () => true },
     // Narrower views, after a divider.
     {
+        id: 'forward',
+        i18n: 'queue.forward.group',
+        fallback: 'Forward',
+        match: () => true,
+        secondary: true,
+        forwardView: true,
+    },
+    {
         id: 'active',
         i18n: 'queue.chip.active',
         fallback: 'Downloading',
         match: (j) => j.status === 'active',
-        secondary: true,
     },
     {
         id: 'queued',
@@ -114,10 +120,12 @@ let _finishedCount = 0;
 let globalPaused = false;
 let engineRunning = false;
 let maxSpeedConfig = null;
+let forwardQueueData = {};
+let forwardOnly = false;
 
 // View state — survives across navigations to the same page.
 const view = {
-    filter: 'current', // default: downloading + queued + paused
+    filter: 'current', // active/queued downloads and pending/processing forwards
     sort: 'addedAt', // 'addedAt' | 'size' | 'progress' | 'group' | 'filename'
     sortDir: 'desc',
     search: '',
@@ -480,6 +488,8 @@ async function loadSnapshot() {
         for (const j of snap.active || []) upsert({ ...j });
         for (const j of snap.queued || []) upsert({ ...j });
         for (const j of snap.recent || []) upsert({ ...j });
+        renderForwardQueue(snap.forwardQueue || {});
+        renderChips();
         view.booted = true;
         scheduleStructuralRender();
     } catch (e) {
@@ -496,12 +506,53 @@ async function loadSnapshot() {
     }
 }
 
+function renderForwardQueue(data) {
+    forwardQueueData = data;
+    const rows = document.getElementById('queue-forward-items');
+    if (!rows) return;
+    const allItems = data.items || [];
+    const items = allItems.filter((item) => forwardOnly
+        ? item.status !== 'not_applicable'
+        : item.status === 'pending' || item.status === 'processing');
+    if (!items.length) {
+        const emptyKey = forwardOnly ? 'queue.forward.empty' : 'queue.forward.empty_pending';
+        const emptyFallback = forwardOnly ? 'No forward jobs recorded' : 'No jobs are waiting to be forwarded';
+        rows.innerHTML = `<p class="py-3 text-xs text-tg-textSecondary">${escapeHtml(i18nT(emptyKey, emptyFallback))}</p>`;
+        return;
+    }
+    const statuses = {
+        pending: 'queue.forward.status.pending',
+        processing: 'queue.forward.status.active',
+        forwarded: 'queue.forward.status.forwarded',
+        failed: 'queue.forward.status.failed',
+        interrupted: 'queue.forward.status.interrupted',
+        not_applicable: 'queue.forward.status.not_applicable',
+    };
+    rows.innerHTML = items.map((item) => {
+        const group = item.groupName || item.groupId || '?';
+        const destinations = (item.destinations || []).join(', ') || '—';
+        const statusKey = statuses[item.status];
+        const status = statusKey ? i18nT(statusKey, item.status) : (item.status || '—');
+        const reason = item.reason ? `<span class="text-red-400/80 truncate">${escapeHtml(item.reason)}</span>` : '';
+        return `<div class="py-2 text-xs flex flex-col sm:flex-row sm:items-center gap-x-3 gap-y-1">
+            <span class="min-w-0 flex-1"><span class="text-tg-text">${escapeHtml(item.fileName || `#${item.messageId}`)}</span>
+                <span class="text-tg-textSecondary"> · ${escapeHtml(group)} · #${escapeHtml(item.messageId)}</span></span>
+            <span class="text-tg-textSecondary truncate" title="${escapeHtml(destinations)}">${escapeHtml(i18nT('queue.forward.destination', 'To'))}: ${escapeHtml(destinations)}</span>
+            <span class="shrink-0 text-tg-textSecondary">${escapeHtml(status)}</span>${reason}
+        </div>`;
+    }).join('');
+}
+
 // ============ WS handlers ============
 //
 // Render-path rules of thumb:
 //   - structural change (add/remove a row, mass status flip)  → scheduleStructuralRender()
 //   - per-row update (progress, speed, single status change)   → scheduleRender() (in-place patch)
 function handleWs(msg) {
+    if (msg.type === 'forward_queue_changed') {
+        loadSnapshot();
+        return;
+    }
     if (msg.type === 'monitor_state') {
         engineRunning = msg.state === 'running';
         if (msg.state === 'stopped' || msg.state === 'error') {
@@ -763,13 +814,12 @@ function _chipCounts() {
     }
     const active = statusCounts.get('active') || 0;
     const queued = statusCounts.get('queued') || 0;
-    const paused = statusCounts.get('paused') || 0;
     return {
-        current: active + queued + paused,
+        current: active + queued + (forwardQueueData.pending || 0) + (forwardQueueData.active || 0),
         all: store.size,
         active,
         queued,
-        paused,
+        paused: statusCounts.get('paused') || 0,
         failed: statusCounts.get('failed') || 0,
         done: statusCounts.get('done') || 0,
         dupe,
@@ -780,31 +830,50 @@ function renderChips() {
     const host = document.getElementById('queue-chips');
     if (!host) return;
     const lang = i18nT('queue.chip.all', 'All');
-    if (_chipsLang !== lang || host.children.length !== STATUS_FILTERS.length) {
+    if (
+        _chipsLang !== lang ||
+        host.querySelectorAll('[data-chip]').length !== STATUS_FILTERS.filter((f) => !f.forwardView).length ||
+        host.querySelectorAll('[data-forward-view]').length !== 1
+    ) {
         _chipsLang = lang;
-        host.innerHTML = STATUS_FILTERS.map(
-            (f) => `<button type="button" data-chip="${f.id}" aria-pressed="false"
+        const downloadChips = STATUS_FILTERS.map(
+            (f) => `<button type="button" ${f.forwardView ? 'data-forward-view' : `data-chip="${f.id}"`} aria-pressed="false"
             class="queue-chip${f.secondary ? ' queue-chip--divider' : ''} px-3 text-xs rounded-full border flex items-center gap-1.5 shrink-0">
             <span>${escapeHtml(i18nT(f.i18n, f.fallback))}</span>
             <span data-chip-count class="tabular-nums opacity-80">0</span>
         </button>`,
         ).join('');
+        host.innerHTML = downloadChips;
     }
     if (!_chipsWired) {
         _chipsWired = true;
         host.addEventListener('click', (ev) => {
+            const forwardBtn = ev.target.closest('[data-forward-view]');
+            if (forwardBtn && host.contains(forwardBtn)) {
+                forwardOnly = true;
+                if (view.filter !== 'current') {
+                    view.filter = 'current';
+                    invalidateFilterCache();
+                    renderRows();
+                }
+                const target = '#/queue/forward';
+                if (location.hash !== target) history.pushState(null, '', target);
+                renderChips();
+                renderForwardQueue(forwardQueueData);
+                return;
+            }
             const btn = ev.target.closest('[data-chip]');
             if (!btn || !host.contains(btn)) return;
+            forwardOnly = false;
             view.filter = btn.dataset.chip;
             invalidateFilterCache();
-            // Update the URL without re-dispatching the route handler so
-            // back/forward still work but we don't churn the page.
             const target =
                 view.filter === 'current'
-                    ? '#/queue'
-                    : `#/queue/${encodeURIComponent(view.filter)}`;
-            if (location.hash !== target) history.replaceState(null, '', target);
+                    ? '#/queue/active'
+                    : `#/queue/${encodeURIComponent(view.filter === 'active' ? 'downloading' : view.filter)}`;
+            if (location.hash !== target) history.pushState(null, '', target);
             renderChips();
+            renderForwardQueue(forwardQueueData);
             // Filter changed → row set changed → full re-render. Reset
             // the rendered window so the user sees the first page of
             // the new filter, not a stale slice.
@@ -816,14 +885,23 @@ function renderChips() {
         });
     }
     const counts = _chipCounts();
-    for (const btn of host.children) {
+    for (const btn of host.querySelectorAll('[data-chip]')) {
         const id = btn.dataset.chip;
-        const active = view.filter === id;
+        const active = !forwardOnly && view.filter === id;
         for (const c of CHIP_ACTIVE_CLS) btn.classList.toggle(c, active);
         btn.setAttribute('aria-pressed', active ? 'true' : 'false');
         for (const c of CHIP_IDLE_CLS) btn.classList.toggle(c, !active);
         const countEl = btn.querySelector('[data-chip-count]');
         const n = String(counts[id] ?? 0);
+        if (countEl && countEl.textContent !== n) countEl.textContent = n;
+    }
+    for (const btn of host.querySelectorAll('[data-forward-view]')) {
+        const active = forwardOnly;
+        for (const c of CHIP_ACTIVE_CLS) btn.classList.toggle(c, active);
+        btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        for (const c of CHIP_IDLE_CLS) btn.classList.toggle(c, !active);
+        const countEl = btn.querySelector('[data-chip-count]');
+        const n = String(counts.forwarding ?? 0);
         if (countEl && countEl.textContent !== n) countEl.textContent = n;
     }
 }
@@ -838,7 +916,11 @@ function _renderEmpty() {
     let t;
     let b;
     let showAll = view.filter !== 'all' && store.size > 0;
-    if (store.size === 0) {
+    const forwardWork = (forwardQueueData.pending || 0) + (forwardQueueData.active || 0);
+    if (view.filter === 'current' && forwardWork > 0) {
+        t = i18nT('queue.forward.only_title', 'Downloads are idle');
+        b = i18nT('queue.forward.only_body', 'Forward jobs are listed above and continue independently.');
+    } else if (store.size === 0) {
         t = i18nT('queue.empty.title', 'Queue is empty');
         b = i18nT(
             'queue.empty.body',
@@ -1209,6 +1291,22 @@ function renderRow(j) {
         }[j.status] || 'bg-gray-700/40 text-gray-300';
     const pillLabel = i18nT(`queue.status.${j.status}`, j.status);
 
+    const originLabel = j.origin
+        ? i18nT(`queue.origin.${j.origin}`, j.origin)
+        : '';
+    const forwardLabels = {
+        pending: i18nT('queue.forward.pending', 'Forward pending'),
+        forwarded: i18nT('queue.forward.forwarded', 'Forwarded'),
+        failed: i18nT('queue.forward.failed', 'Forward failed'),
+        interrupted: i18nT('queue.forward.interrupted', 'Forward interrupted by restart'),
+    };
+    const lifecycle = [
+        originLabel ? `<span title="${escapeHtml(i18nT('queue.origin.tooltip', 'Queue source'))}">${escapeHtml(originLabel)}</span>` : '',
+        forwardLabels[j.forwardStatus] ? `<span title="${escapeHtml(i18nT('queue.forward.tooltip', 'Auto-forward status'))}">${escapeHtml(forwardLabels[j.forwardStatus])}</span>` : '',
+        j.localDeleted ? `<span title="${escapeHtml(i18nT('queue.deleted.tooltip', 'Local file deleted after forwarding'))}">${escapeHtml(i18nT('queue.deleted', 'Deleted after forward'))}</span>` : '',
+        j.deleteStatus === 'pending' ? `<span title="${escapeHtml(i18nT('queue.deleted.pending_tooltip', 'Local file will be deleted after forwarding succeeds'))}">${escapeHtml(i18nT('queue.deleted.pending', 'Delete after forward'))}</span>` : '',
+    ].filter(Boolean);
+
     // "Duplicate" tag — emitted when the downloader finished but the file
     // hash matched an existing on-disk row. The file isn't downloaded
     // again (`bytesAddedToDisk = 0`) but the (group, msg) → file mapping
@@ -1326,6 +1424,9 @@ function renderRow(j) {
                       ? `<span class="tabular-nums" title="${escapeHtml(i18nT('queue.row.duration_tooltip', 'Time taken'))}">${escapeHtml(_fmtDuration(j.finishedAt - j.addedAt))}</span>`
                       : ''
               }`
+            : '',
+        lifecycle.length
+            ? `<span class="inline-flex items-center gap-1">${lifecycle.join('<span class="text-tg-textSecondary/40">·</span>')}</span>`
             : '',
     ].filter(Boolean);
 
@@ -1466,6 +1567,7 @@ function renderAggregate() {
     host.innerHTML = `
         <span><i class="ri-loader-2-line text-tg-blue"></i> ${i18nTf('queue.agg.active', { n: active }, `${active} active`)}</span>
         <span><i class="ri-time-line"></i> ${i18nTf('queue.agg.queued', { n: queued }, `${queued} queued`)}</span>
+        <span><i class="ri-send-plane-line"></i> ${i18nTf('queue.agg.forwarding', { n: (forwardQueueData.pending || 0) + (forwardQueueData.active || 0) }, `${(forwardQueueData.pending || 0) + (forwardQueueData.active || 0)} forwarding`)}</span>
         <span><i class="ri-flashlight-line"></i> ${escapeHtml(speed)}${_speedSparkline()}</span>
         ${globalPaused ? `<span class="text-tg-orange">· ${escapeHtml(i18nT('queue.agg.paused_global', 'Globally paused'))}</span>` : ''}
         ${!engineRunning ? `<span class="text-tg-textSecondary">· ${escapeHtml(i18nT('queue.agg.engine_stopped', 'Engine stopped'))}</span>` : ''}
@@ -1625,14 +1727,29 @@ export function initQueue() {
 
 export async function showQueuePage(params = {}) {
     view.visible = true;
-    if (params?.status && STATUS_FILTERS.some((f) => f.id === params.status)) {
-        view.filter = params.status;
-        invalidateFilterCache();
+    const isForwardRoute = params.status === 'forward' || params.status?.startsWith('forward_');
+    forwardOnly = isForwardRoute;
+    if (isForwardRoute) {
+        if (view.filter !== 'current') {
+            view.filter = 'current';
+            invalidateFilterCache();
+        }
+    } else {
+        const status = params?.status === 'active'
+            ? 'current'
+            : params?.status === 'downloading'
+              ? 'active'
+              : params?.status;
+        if (status && STATUS_FILTERS.some((f) => f.id === status)) {
+            view.filter = status;
+            invalidateFilterCache();
+        }
     }
     if (!view.booted) await loadSnapshot();
     wireOnce();
     bindThrottleSlider();
     renderChips();
+    renderForwardQueue(forwardQueueData);
     renderAggregate();
     renderRows();
     renderToolbarState();

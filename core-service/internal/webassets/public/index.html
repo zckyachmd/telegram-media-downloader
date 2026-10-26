@@ -914,6 +914,32 @@
                                 </div>
                             </div>
 
+                            <div class="border-t border-tg-border/50 pt-4">
+                                <h4 class="text-tg-text text-sm font-medium mb-2" data-i18n="settings.advanced.forwarder">Forwarder</h4>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    <div>
+                                        <label for="setting-adv-forward-concurrency" class="text-tg-text text-xs block mb-1" data-i18n="settings.advanced.forward_concurrency">Concurrent forwards</label>
+                                        <input id="setting-adv-forward-concurrency" type="number" min="1" max="5" class="tg-input w-full text-sm" placeholder="1">
+                                        <p class="text-[10px] text-tg-textSecondary mt-1" data-i18n="settings.advanced.forward_concurrency_help">Forward worker limit. Start at 1; higher values send several files at once and can trigger Telegram flood limits.</p>
+                                    </div>
+                                    <div>
+                                        <label for="setting-adv-forward-queue-size" class="text-tg-text text-xs block mb-1" data-i18n="settings.advanced.forward_queue_size">Forward queue capacity</label>
+                                        <input id="setting-adv-forward-queue-size" type="number" min="1" max="10000" class="tg-input w-full text-sm" placeholder="256">
+                                        <p class="text-[10px] text-tg-textSecondary mt-1" data-i18n="settings.advanced.forward_queue_size_help">Maximum pending and active jobs. Jobs over the limit are recorded as failed.</p>
+                                    </div>
+                                    <div>
+                                        <label for="setting-adv-forward-interval-sec" class="text-tg-text text-xs block mb-1" data-i18n="settings.advanced.forward_interval">Start interval (seconds)</label>
+                                        <input id="setting-adv-forward-interval-sec" type="number" min="0" max="3600" class="tg-input w-full text-sm" placeholder="0">
+                                        <p class="text-[10px] text-tg-textSecondary mt-1" data-i18n="settings.advanced.forward_interval_help">Minimum gap between forward starts across all workers. 0 means no added delay.</p>
+                                    </div>
+                                    <div>
+                                        <label for="setting-adv-forward-flood-attempts" class="text-tg-text text-xs block mb-1" data-i18n="settings.advanced.forward_flood_attempts">FloodWait attempts</label>
+                                        <input id="setting-adv-forward-flood-attempts" type="number" min="1" max="10" class="tg-input w-full text-sm" placeholder="3">
+                                        <p class="text-[10px] text-tg-textSecondary mt-1" data-i18n="settings.advanced.forward_flood_attempts_help">Total sends for a job when Telegram asks this account to wait.</p>
+                                    </div>
+                                </div>
+                            </div>
+
                             <!-- History -->
                             <div class="border-t border-tg-border/50 pt-4">
                                 <h4 class="text-tg-text text-sm font-medium mb-2" data-i18n="settings.advanced.history">History backfill</h4>
@@ -1681,12 +1707,14 @@
                      visible rows + a small over-scroll buffer (see
                      js/queue.js for the math). -->
                 <div id="page-queue" class="hidden max-w-5xl mx-auto px-3 sm:px-4">
+                    <section class="bg-tg-panel rounded-xl p-3 mb-3">
+                        <div id="queue-chips" class="queue-chip-row" role="toolbar" data-i18n-aria-label="queue.chips_label" aria-label="Filter queue jobs"></div>
+                    </section>
                     <!-- Top toolbar — status chips (one scrollable row; the default
                          "Active" view shows downloading + queued + paused), then
                          search, sort and the ⋮ menu (speed limit, and the global
                          actions below 1280 px — js/queue.js moves them). -->
                     <section class="bg-tg-panel rounded-xl p-3 mb-3">
-                        <div id="queue-chips" class="queue-chip-row" role="toolbar" data-i18n-aria-label="queue.chips_label" aria-label="Show downloads"></div>
                         <div class="flex items-center gap-2 mt-3">
                             <div class="relative flex-1 min-w-0">
                                 <i class="ri-search-line absolute left-3 top-1/2 -translate-y-1/2 text-tg-textSecondary" aria-hidden="true"></i>
@@ -3585,6 +3613,40 @@
                                     <i class="ri-download-line"></i><span data-i18n="maintenance.logs.download">Download .log</span>
                                 </button>
                             </div>
+                        </div>
+                    </section>
+
+                    <section class="bg-tg-panel rounded-xl p-4 mb-3" aria-labelledby="processing-history-title">
+                        <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
+                            <div>
+                                <h3 id="processing-history-title" class="text-tg-text text-sm font-semibold" data-i18n="maintenance.logs.history.title">Download processing history</h3>
+                                <p class="text-xs text-tg-textSecondary" data-i18n="maintenance.logs.history.help">Persistent attempts, deduplication and forwarding results. Clear a group's history with its existing Group Monitor cleanup action.</p>
+                            </div>
+                            <label class="text-xs text-tg-textSecondary"><span data-i18n="maintenance.logs.history.group">Group</span>
+                                <select id="processing-history-group" class="tg-input ml-1 py-1.5"><option value="" data-i18n="maintenance.logs.history.all_groups">All groups</option></select>
+                            </label>
+                        </div>
+                        <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 xl:grid-cols-10 gap-2 mb-4">
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.attempts">Attempts</div><strong id="history-stat-attempts">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.downloaded">Downloaded</div><strong id="history-stat-downloaded">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.reused">Reused</div><strong id="history-stat-reused">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.duplicates">Duplicate skips</div><strong id="history-stat-duplicates">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.unique">Unique files</div><strong id="history-stat-unique">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.failed">Failed</div><strong id="history-stat-failed">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.forwarded">Forwarded</div><strong id="history-stat-forwarded">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.forward_failed">Forward failed</div><strong id="history-stat-forward-failed">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.deleted">Local deletes</div><strong id="history-stat-deleted">0</strong></div>
+                            <div class="rounded-lg bg-tg-bg/60 p-2"><div class="text-[10px] text-tg-textSecondary" data-i18n="maintenance.logs.history.delete_failed">Delete failed</div><strong id="history-stat-delete-failed">0</strong></div>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-xs text-left">
+                                <thead class="text-tg-textSecondary"><tr><th class="py-2 pr-3" data-i18n="maintenance.logs.history.time">Time</th><th class="py-2 pr-3" data-i18n="maintenance.logs.history.group_message">Group / message</th><th class="py-2 pr-3" data-i18n="maintenance.logs.history.file">File</th><th class="py-2 pr-3" data-i18n="maintenance.logs.history.result">Result</th><th class="py-2 pr-3" data-i18n="maintenance.logs.history.forward">Forward</th><th class="py-2" data-i18n="maintenance.logs.history.local_file">Local file</th></tr></thead>
+                                <tbody id="processing-history-rows"></tbody>
+                            </table>
+                        </div>
+                        <div class="flex items-center justify-between gap-2 mt-3">
+                            <span id="processing-history-count" class="text-xs text-tg-textSecondary"></span>
+                            <button id="processing-history-more" type="button" class="tg-btn-secondary text-xs px-3 py-1.5 hidden" data-i18n="maintenance.logs.history.load_more">Load more</button>
                         </div>
                     </section>
 

@@ -42,15 +42,35 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 		// backfilled messages follow download.skipDuplicates.
 		item.SkipDuplicates = a.skipDuplicates(ctx)
 	}
-	if err := rescue.Observe(ctx, a.db.Writer, accountID, groupID, message, engine.Origin(ctx)); err != nil {
-		return download.Record{}, err
-	}
-	forward, err := a.forwardCandidate(ctx, item.GroupID, item.MessageID)
+	origin := engine.Origin(ctx)
+	attemptID, err := a.startProcessingAttempt(ctx, item, origin)
 	if err != nil {
 		return download.Record{}, err
+	}
+	if err := rescue.Observe(ctx, a.db.Writer, accountID, groupID, message, engine.Origin(ctx)); err != nil {
+		return download.Record{}, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
+	}
+	forward, forwardSettings, forwardAccountID, err := a.forwardCandidate(ctx, item.GroupID, item.MessageID)
+	if err != nil {
+		return download.Record{}, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
 	}
 	record, err := a.library.Ingest(ctx, item, telegram.AttachmentClient{Source: transport, Media: attachment})
 	if err != nil {
+		return record, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
+	}
+	outcome := "downloaded"
+	if record.Skipped {
+		outcome = "duplicate_skipped"
+	} else if record.Reused {
+		outcome = "reused"
+	}
+	forwardStatus := "not_applicable"
+	deleteAfterForward := false
+	if forward && !record.Skipped {
+		forwardStatus = "pending"
+		deleteAfterForward = forwardSettings["deleteAfterForward"] == true
+	}
+	if err := a.finishProcessingAttempt(ctx, attemptID, outcome, record.SkipReason, record.SHA256, forwardStatus, deleteAfterForward); err != nil {
 		return record, err
 	}
 	if record.Skipped {
@@ -63,7 +83,7 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 		a.hub.Broadcast(ws.Event{Type: "monitor_download", Payload: map[string]any{"group": groupName, "type": "ttl", "messageId": message.ID, "ttl": ttl}})
 	}
 	if forward {
-		a.queueForward(forwardJob{groupID: item.GroupID, groupName: groupName, messageID: message.ID, topicID: telegram.MessageTopicID(message), text: message.Message, recordID: record.ID, path: record.Path, facts: attachment.Facts})
+		a.queueForward(forwardJob{groupID: item.GroupID, groupName: groupName, messageID: message.ID, topicID: telegram.MessageTopicID(message), text: message.Message, recordID: record.ID, historyID: attemptID, path: record.Path, facts: attachment.Facts, settings: forwardSettings, accountID: forwardAccountID})
 	}
 	payload := map[string]any{"key": item.GroupID + "_" + strconv.FormatInt(item.MessageID, 10), "groupId": item.GroupID, "groupName": item.GroupName, "messageId": item.MessageID, "fileName": item.Name, "filePath": record.Path, "fileSize": item.Identity.Size, "mediaType": item.Type, "deduped": record.Reused, "addedAt": nil, "accountId": accountID, "accountName": nil}
 	a.hub.Broadcast(ws.Event{Type: "download_complete", Payload: payload})

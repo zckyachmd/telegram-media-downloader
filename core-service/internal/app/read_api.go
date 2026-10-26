@@ -112,6 +112,12 @@ func (a *App) handleAPIQueueSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 500, "queue read failed")
 		return
 	}
+	forwardQueue, err := a.forwardQueueSnapshot(r.Context())
+	if err != nil {
+		writeJSONError(w, 500, "forward queue read failed")
+		return
+	}
+	snapshot["forwardQueue"] = forwardQueue
 	writeJSON(w, http.StatusOK, snapshot)
 }
 

@@ -335,6 +335,14 @@ make test    # Go tests
 make check   # gofmt, go vet, race tests
 ```
 
+For host development with live reload, install [Air](https://github.com/air-verse/air) with `go install github.com/air-verse/air@latest`, then run:
+
+```bash
+TGDL_DATA_DIR=/path/to/dev-data TGDL_DOWNLOADS_DIR=/path/to/dev-downloads make dev
+```
+
+Open `http://127.0.0.1:3002`. Air watches Go and web asset files, rebuilds the native server incrementally, and reloads the browser. The server listens privately on port `3003`; Air proxies it on port `3002` for browser reloads.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
