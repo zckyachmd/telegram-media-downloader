@@ -99,6 +99,14 @@ func (a *App) monitorStatusPayload(ctx context.Context) (map[string]any, error) 
 	if err != nil {
 		return nil, err
 	}
+	var backfill, forward int
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_history_jobs WHERE state='running'`).Scan(&backfill); err != nil {
+		return nil, err
+	}
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing')`).Scan(&forward); err != nil {
+		return nil, err
+	}
+	status["backfill"], status["forward"] = backfill, forward
 	status["hint"] = hint
 	if status["accounts"] == 0 {
 		status["accounts"] = accounts

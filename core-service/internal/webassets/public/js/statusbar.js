@@ -22,6 +22,14 @@ function applyState(state) {
     const m = map[state] || map.stopped;
     if (dot) dot.className = `w-2 h-2 rounded-full ${m.color}`;
     if (lbl) lbl.textContent = m.text;
+    const running = ['running', 'starting', 'reconnecting'].includes(state);
+    document.querySelectorAll('[data-monitor-action]').forEach((button) => {
+        const action = button.dataset.monitorAction;
+        const visible = action === 'start' ? ['stopped', 'error'].includes(state) :
+            action === 'stop' ? running : action === 'restart' && state === 'running';
+        button.classList.toggle('hidden', !visible);
+        button.disabled = ['starting', 'stopping', 'reconnecting'].includes(state);
+    });
     const pillEl = $('engine-status-pill');
     if (pillEl) {
         pillEl.dataset.state = state || 'stopped';
@@ -41,6 +49,10 @@ function applyMonitor(mon) {
     if (q) q.textContent = mon.queue ?? 0;
     const a = $('status-active');
     if (a) a.textContent = mon.active ?? 0;
+    const b = $('status-backfill');
+    if (b && mon.backfill != null) b.textContent = mon.backfill;
+    const f = $('status-forward');
+    if (f && mon.forward != null) f.textContent = mon.forward;
     // Bottom-nav engine badge — surface "there's something happening on
     // the Engine page" without forcing the user to navigate there. The
     // queue tab already has its own badge sourced from queue.js (which
@@ -247,6 +259,25 @@ export function initStatusBar() {
         );
     });
     ws.on('monitor_state', (m) => applyState(m.state));
+    for (const [id, action, toastKey, fallback, kind] of [
+        ['monitor-start-btn', 'start', 'toast.monitor_started', 'Monitor started', 'success'],
+        ['monitor-restart-btn', 'restart', 'toast.monitor_restarted', 'Monitor restarted', 'success'],
+        ['monitor-stop-btn', 'stop', 'toast.monitor_stopped', 'Monitor stopped', 'info'],
+    ]) {
+        $(id)?.addEventListener('click', async () => {
+            const button = $(id);
+            button.disabled = true;
+            try {
+                const result = await api.post(`/api/monitor/${action}`);
+                applyMonitor(result.status);
+                showToast(i18nT(toastKey, fallback), kind);
+            } catch (error) {
+                showToast(error?.data?.error || error?.message || `${fallback} failed`, 'error');
+            } finally {
+                button.disabled = false;
+            }
+        });
+    }
     // No per-event refetch: queue / active counters ride the 3 s
     // `monitor_status_push` and file / disk / group counters ride the
     // server's debounced `stats_update` push (both wired above). The old

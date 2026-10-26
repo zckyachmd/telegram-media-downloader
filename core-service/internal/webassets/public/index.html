@@ -413,7 +413,7 @@
                         data-i18n-title="header.stories" title="Download Telegram Stories">
                         <i class="ri-camera-line text-xl text-tg-textSecondary" aria-hidden="true"></i>
                     </button>
-                    <div class="relative hidden sm:block">
+                    <div id="header-view-mode-control" class="relative hidden sm:block">
                         <button id="view-mode-btn" type="button"
                             class="w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover flex items-center justify-center"
                             aria-haspopup="menu" aria-expanded="false"
@@ -438,15 +438,20 @@
                             </button>
                         </div>
                     </div>
-                    <button id="refresh-btn" type="button"
-                        class="hidden sm:flex w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center"
-                        data-i18n-aria-label="header.refresh" aria-label="Refresh"
-                        onclick="refreshCurrentPage()">
-                        <i class="ri-refresh-line text-xl text-tg-textSecondary" aria-hidden="true"></i>
-                    </button>
+                    <div class="hidden sm:flex items-center gap-1" role="group" data-i18n-aria-label="header.monitor_actions" aria-label="Monitor controls">
+                        <button id="monitor-start-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-green focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-green" data-monitor-action="start" data-admin-only data-i18n-title="header.monitor_start" title="Start monitor" aria-label="Start monitor">
+                            <i class="ri-play-line text-xl" aria-hidden="true"></i>
+                        </button>
+                        <button id="monitor-restart-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-blue focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-blue" data-monitor-action="restart" data-admin-only data-i18n-title="header.monitor_restart" title="Restart monitor" aria-label="Restart monitor">
+                            <i class="ri-refresh-line text-xl" aria-hidden="true"></i>
+                        </button>
+                        <button id="monitor-stop-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-red focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-red" data-monitor-action="stop" data-admin-only data-i18n-title="header.monitor_stop" title="Stop monitor" aria-label="Stop monitor">
+                            <i class="ri-stop-line text-xl" aria-hidden="true"></i>
+                        </button>
+                    </div>
 
                     <!-- Mobile-only overflow ⋮ menu — hosts paste-link / stories
-                         / view-mode-{grid,compact,list} / refresh. Each entry
+                         / view-mode-{grid,compact,list} / monitor quick actions. Each entry
                          delegates to the desktop button via .click() so the
                          business logic lives in one place. -->
                     <div class="relative sm:hidden">
@@ -469,7 +474,7 @@
                                 <i class="ri-history-line"></i>
                                 <span class="vm-label" data-i18n="backfill.sheet.menu_item">Backfill this chat</span>
                             </button>
-                            <div class="border-t border-tg-border my-1"></div>
+                            <div class="border-t border-tg-border my-1" data-view-mode-only></div>
                             <button type="button" data-overflow="vm-grid" role="menuitem">
                                 <i class="ri-layout-grid-line"></i>
                                 <span class="vm-label" data-i18n="header.view_mode.grid">Grid</span>
@@ -482,10 +487,18 @@
                                 <i class="ri-list-check-2"></i>
                                 <span class="vm-label" data-i18n="header.view_mode.list">List</span>
                             </button>
-                            <div class="border-t border-tg-border my-1"></div>
-                            <button type="button" data-overflow="refresh" role="menuitem">
+                            <div class="border-t border-tg-border my-1" data-view-mode-only></div>
+                            <button type="button" data-overflow="monitor-start" data-monitor-action="start" data-admin-only role="menuitem" class="hidden">
+                                <i class="ri-play-line"></i>
+                                <span class="vm-label" data-i18n="header.monitor_start">Start monitor</span>
+                            </button>
+                            <button type="button" data-overflow="monitor-restart" data-monitor-action="restart" data-admin-only role="menuitem" class="hidden">
                                 <i class="ri-refresh-line"></i>
-                                <span class="vm-label" data-i18n="header.refresh">Refresh</span>
+                                <span class="vm-label" data-i18n="header.monitor_restart">Restart monitor</span>
+                            </button>
+                            <button type="button" data-overflow="monitor-stop" data-monitor-action="stop" data-admin-only role="menuitem" class="hidden">
+                                <i class="ri-stop-line"></i>
+                                <span class="vm-label" data-i18n="header.monitor_stop">Stop monitor</span>
                             </button>
                         </div>
                     </div>
@@ -4195,20 +4208,28 @@
         <!-- Separator between guest and admin sections (hidden on mobile to save space) -->
         <span class="hidden md:inline text-tg-textSecondary/40 select-none" data-admin-only aria-hidden="true">|</span>
 
-        <!-- Admin-only section: engine state · queue · active -->
+        <!-- Admin-only section: engine state · queue · downloads · backfill · forward -->
         <span class="flex items-center gap-1.5 status-chip" data-admin-only>
             <span id="status-dot" class="w-2 h-2 rounded-full bg-gray-500 shrink-0"></span>
             <span id="status-state" class="text-tg-textSecondary" data-i18n="status.idle">Idle</span>
         </span>
         <span class="status-chip hidden md:inline-flex" data-admin-only>
             <i class="ri-download-cloud-2-line text-tg-textSecondary" aria-hidden="true"></i>
-            <span class="text-tg-textSecondary" data-i18n="status.queue">Q:</span>
+            <span class="text-tg-textSecondary" data-i18n="status.queue">Queue:</span>
             <span class="status-chip-val" id="status-queue">0</span>
         </span>
         <span class="status-chip hidden md:inline-flex" data-admin-only>
             <i class="ri-loader-2-line text-tg-textSecondary" aria-hidden="true"></i>
-            <span class="text-tg-textSecondary" data-i18n="status.active">A:</span>
+            <span class="text-tg-textSecondary" data-i18n="status.download">Download:</span>
             <span class="status-chip-val" id="status-active">0</span>
+        </span>
+        <span class="status-chip hidden md:inline-flex" data-admin-only>
+            <span class="text-tg-textSecondary" data-i18n="status.backfill">Backfill:</span>
+            <span class="status-chip-val" id="status-backfill">0</span>
+        </span>
+        <span class="status-chip hidden md:inline-flex" data-admin-only>
+            <span class="text-tg-textSecondary" data-i18n="status.forward">Forward:</span>
+            <span class="status-chip-val" id="status-forward">0</span>
         </span>
 
         <!-- Right cluster: WS indicator · update badge · version (admin, desktop) -->

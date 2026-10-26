@@ -959,6 +959,11 @@ function renderPage(page, params = {}) {
     }
     state.currentPage = page;
     document.body.dataset.page = page;
+    const viewModeControl = document.getElementById('header-view-mode-control');
+    if (viewModeControl) viewModeControl.style.display = page === 'viewer' ? '' : 'none';
+    document.querySelectorAll('#header-overflow-menu [data-vm], #header-overflow-menu [data-view-mode-only]').forEach((el) => {
+        el.style.display = page === 'viewer' ? '' : 'none';
+    });
     _syncChatHeaderActions();
     updateSelectionBar();
     state.currentRouteParams = params;
