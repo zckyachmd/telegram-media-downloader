@@ -9,3 +9,4 @@
 - **Forward route**: A rule that sends files from a source topic to a destination; **All** applies to every topic and can run alongside topic-specific routes.
 - **Forward destination**: The Telegram chat, channel, Saved Messages, or Telegram Downloader Storage selected for a route.
 - **Active forward**: A file currently being uploaded to its configured destination.
+- **Dev asset serving**: In local development, serve frontend files from the working tree so edits appear after a browser refresh without rebuilding the Go binary.

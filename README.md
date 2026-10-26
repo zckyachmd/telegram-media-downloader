@@ -335,13 +335,13 @@ make test    # Go tests
 make check   # gofmt, go vet, race tests
 ```
 
-For host development with live reload, install [Air](https://github.com/air-verse/air) with `go install github.com/air-verse/air@latest`, then run:
+For host development, install [Air](https://github.com/air-verse/air) with `go install github.com/air-verse/air@latest`, then run:
 
 ```bash
-TGDL_DATA_DIR=/path/to/dev-data TGDL_DOWNLOADS_DIR=/path/to/dev-downloads make dev
+make dev
 ```
 
-Open `http://127.0.0.1:3002`. Air watches Go and web asset files, rebuilds the native server incrementally, and reloads the browser. The server listens privately on port `3003`; Air proxies it on port `3002` for browser reloads.
+Open `http://127.0.0.1:3002`. Development data defaults to the ignored `data/dev` directory; set `TGDL_DATA_DIR` (and optionally `TGDL_DOWNLOADS_DIR`) to use other locations. Air rebuilds the Go server when Go files change. Frontend files are served from the working tree, so refresh the browser after editing them.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 

@@ -107,7 +107,7 @@ if (isStandalone()) setInstallVisible(false);
 // Register on page load so it doesn't compete with the SPA boot for
 // bandwidth. Auto-update: when a new SW takes control we reload once so
 // the user sees the new shell immediately.
-if ('serviceWorker' in navigator) {
+if ('serviceWorker' in navigator && document.body?.dataset.devMode !== 'true') {
     let refreshing = false;
     navigator.serviceWorker.addEventListener('controllerchange', () => {
         if (refreshing) return;

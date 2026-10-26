@@ -42,6 +42,27 @@ func TestNewServesHealthAndStaticWithAuthenticatedWebSocket(t *testing.T) {
 	}
 }
 
+func TestDevStaticHandlerServesChangedFiles(t *testing.T) {
+	files := fstest.MapFS{"app.js": &fstest.MapFile{Data: []byte("first")}}
+	h := newStaticHandler(files, true)
+	get := func() string {
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/app.js", nil))
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d", rr.Code)
+		}
+		return rr.Body.String()
+	}
+	if got := get(); got != "first" {
+		t.Fatalf("first body = %q", got)
+	}
+	files["app.js"].Data = []byte("second")
+	files["app.js"].ModTime = time.Now().Add(time.Second)
+	if got := get(); got != "second" {
+		t.Fatalf("updated body = %q", got)
+	}
+}
+
 func TestAuthCheckIsAReadyEndpointWithoutSession(t *testing.T) {
 	a, err := New(context.Background(), Config{DataDir: t.TempDir(), Port: 0})
 	if err != nil {

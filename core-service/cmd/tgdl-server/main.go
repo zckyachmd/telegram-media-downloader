@@ -51,10 +51,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	static, err := fs.Sub(webassets.FS, "public")
-	if err != nil {
-		_, _ = fmt.Fprintln(stderr, err)
-		return 1
+	devMode := os.Getenv("TGDL_DEV_MODE") == "1"
+	var static fs.FS
+	if devMode {
+		static = os.DirFS("internal/webassets/public")
+	} else {
+		static, err = fs.Sub(webassets.FS, "public")
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, err)
+			return 1
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -63,7 +69,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: os.Getenv("TGDL_DEV_MODE") == "1"})
+	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: devMode})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1

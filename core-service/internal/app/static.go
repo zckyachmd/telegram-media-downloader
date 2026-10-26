@@ -58,6 +58,14 @@ func newStaticHandler(files fs.FS, devMode bool) http.Handler {
 			return
 		}
 		cached, ok := cache.Load(name)
+		if devMode && ok {
+			body := cached.(staticBody)
+			info, err := fs.Stat(files, name)
+			if err != nil || !info.ModTime().Equal(body.modTime) {
+				cache.Delete(name)
+				ok = false
+			}
+		}
 		if !ok {
 			data, err := fs.ReadFile(files, name)
 			if err != nil {
@@ -67,7 +75,11 @@ func newStaticHandler(files fs.FS, devMode bool) http.Handler {
 			if strings.HasPrefix(name, "icons/") {
 				w.Header().Del("Vary")
 			}
-			body := staticBody{data: data, modTime: time.Now().UTC()}
+			modTime := time.Now().UTC()
+			if info, err := fs.Stat(files, name); err == nil {
+				modTime = info.ModTime()
+			}
+			body := staticBody{data: data, modTime: modTime}
 			switch name {
 			case "index.html", "login.html", "setup-needed.html", "add-account.html":
 				body.rewritten = true
@@ -76,6 +88,7 @@ func newStaticHandler(files fs.FS, devMode bool) http.Handler {
 				if devMode {
 					marker := []byte(`<meta name="tgdl-dev-assets" content="` + assetVersion + `">`)
 					body.data = bytes.Replace(body.data, []byte("<head>"), append([]byte("<head>"), marker...), 1)
+					body.data = bytes.Replace(body.data, []byte("<body"), []byte(`<body data-dev-mode="true"`), 1)
 				}
 			}
 			if strings.HasPrefix(name, "js/") && strings.HasSuffix(name, ".js") {

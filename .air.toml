@@ -4,7 +4,7 @@ tmp_dir = "tmp"
 [build]
 cmd = "go build -o ./tmp/tgdl-server ./cmd/tgdl-server"
 entrypoint = ["./tmp/tgdl-server"]
-include_ext = ["go", "html", "js", "css", "json", "svg"]
+include_ext = ["go"]
 exclude_dir = ["tmp", "vendor"]
 exclude_regex = ["_test\\.go"]
 exclude_unchanged = true
