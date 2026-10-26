@@ -1,0 +1,3 @@
+# Explicit forward destinations
+
+Forwarding routes require an explicit destination, including a named **Telegram Downloader Storage** option, so an empty field cannot silently send files somewhere unexpected. Topic-capable chats start with an **All** route, and topic-specific routes add their destination alongside the All destination. A destination change during an active forward requires confirmation and applies only to files that enter the queue afterward; queued work keeps the route snapshot it had when queued. This preserves the current upload and prevents rerouting queued files by accident.

@@ -6902,7 +6902,7 @@ body:not(.in-chat) [data-chat-only] {
     min-width: 0;
     width: 100%;
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     align-items: end;
     gap: 10px 16px;
     padding: 12px;
@@ -6910,6 +6910,9 @@ body:not(.in-chat) [data-chat-only] {
     border-radius: 12px;
     background: var(--tg-panel);
     box-sizing: border-box;
+}
+.cd-forward-route:has([data-route-source-topic-wrap]:not(.hidden)) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 .cd-forward-route:has([data-route-destination-topic-wrap]:not(.hidden)) {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -7063,6 +7066,25 @@ body:not(.in-chat) [data-chat-only] {
     cursor: pointer;
     box-sizing: border-box;
     transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+@media (max-width: 640px) {
+    .cd-forward-route,
+    .cd-forward-route:has([data-route-source-topic-wrap]:not(.hidden)),
+    .cd-forward-route:has([data-route-destination-topic-wrap]:not(.hidden)) {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .cd-route-heading {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .cd-route-add {
+        align-self: flex-start;
+        max-width: 100%;
+    }
 }
 .cd-select-trigger > span {
     min-width: 0;

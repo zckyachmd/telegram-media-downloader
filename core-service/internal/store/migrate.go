@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -127,6 +128,72 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
         path TEXT PRIMARY KEY NOT NULL, item TEXT NOT NULL, generation INTEGER NOT NULL, sha256 TEXT NOT NULL DEFAULT ''
     )`); err != nil {
 		return 0, fmt.Errorf("create ingest journal: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS tgdl_processing_attempts (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, group_id TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '', message_id INTEGER NOT NULL,
+		file_name TEXT NOT NULL DEFAULT '', file_size INTEGER NOT NULL DEFAULT 0, origin TEXT NOT NULL DEFAULT '',
+		outcome TEXT NOT NULL DEFAULT 'processing', reason TEXT NOT NULL DEFAULT '', media_hash TEXT NOT NULL DEFAULT '', media_key TEXT NOT NULL DEFAULT '',
+		forward_status TEXT NOT NULL DEFAULT 'not_applicable', forward_reason TEXT NOT NULL DEFAULT '',
+		local_delete_status TEXT NOT NULL DEFAULT 'not_requested', local_delete_reason TEXT NOT NULL DEFAULT '', local_deleted INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL, completed_at INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		return 0, fmt.Errorf("create processing history: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_processing_attempts_group_id ON tgdl_processing_attempts(group_id,id DESC)`); err != nil {
+		return 0, err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_processing_attempts_message ON tgdl_processing_attempts(group_id,message_id,id DESC)`); err != nil {
+		return 0, err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS tgdl_forward_queue (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, history_id INTEGER NOT NULL DEFAULT 0, group_id TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '',
+		message_id INTEGER NOT NULL, file_name TEXT NOT NULL DEFAULT '', topic_id INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL DEFAULT '',
+		record_id INTEGER NOT NULL DEFAULT 0, file_path TEXT NOT NULL DEFAULT '', facts_json TEXT NOT NULL DEFAULT '{}', forward_config_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'pending',
+		reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, completed_at INTEGER NOT NULL DEFAULT 0
+	)`); err != nil {
+		return 0, fmt.Errorf("create forward queue: %w", err)
+	}
+	columns, err := db.QueryContext(ctx, `PRAGMA table_info(tgdl_forward_queue)`)
+	if err != nil {
+		return 0, err
+	}
+	hasForwardConfig := false
+	for columns.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := columns.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			columns.Close()
+			return 0, err
+		}
+		if name == "forward_config_json" {
+			hasForwardConfig = true
+		}
+	}
+	if err := columns.Close(); err != nil {
+		return 0, err
+	}
+	if !hasForwardConfig {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN forward_config_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
+			return 0, fmt.Errorf("add forward queue config snapshot: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_forward_queue_status ON tgdl_forward_queue(status,id)`); err != nil {
+		return 0, err
+	}
+	now := time.Now().UnixMilli()
+	if _, err := db.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status='interrupted',reason='server restarted before forwarding completed',updated_at=?,completed_at=? WHERE status='processing'`, now, now); err != nil {
+		return 0, err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tgdl_processing_attempts SET outcome='interrupted',reason='server restarted before processing completed',completed_at=? WHERE outcome='processing'`, now); err != nil {
+		return 0, err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tgdl_processing_attempts SET outcome='interrupted',reason='processing cancelled (context canceled)',completed_at=? WHERE outcome='failed' AND reason IN ('download Telegram media: context canceled','download Telegram media: write output: context canceled')`, now); err != nil {
+		return 0, err
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tgdl_processing_attempts SET forward_status='interrupted',forward_reason='server restarted before forwarding completed',completed_at=?
+		WHERE forward_status='processing' OR (forward_status='pending' AND NOT EXISTS (SELECT 1 FROM tgdl_forward_queue q WHERE q.history_id=tgdl_processing_attempts.id AND q.status IN ('pending','processing')))`, now); err != nil {
+		return 0, err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS tgdl_derived_cleanup (area TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(area,path))`); err != nil {
 		return 0, err

@@ -372,11 +372,21 @@ function forwardGroupOptions(selected) {
     for (const chat of [...(state.allDialogs || []), ...(state.groups || [])]) {
         if (chat?.id == null) continue;
         const id = String(chat.id);
+        if (id === 'me' || id === 'storage') continue;
         byID.set(id, { id, name: getGroupName(id, { fallback: chat.name || chat.title }) });
     }
     if (cur?.id) byID.set(String(cur.id), { id: String(cur.id), name: cur.name });
     const groups = [...byID.values()].sort((a, b) => a.name.localeCompare(b.name));
-    return `<option value="">${escapeHtml(i18nT('group.fwd.select_group', 'Select a group…'))}</option>${groups
+    const special = [
+        { id: 'storage', name: i18nT('group.fwd.storage', 'Telegram Downloader Storage') },
+        { id: 'me', name: i18nT('group.fwd.saved_messages', 'Saved Messages') },
+    ];
+    if (selected && !special.some((item) => item.id === String(selected)) && !byID.has(String(selected))) {
+        special.push({ id: String(selected), name: getGroupName(String(selected), { fallback: String(selected) }) });
+    }
+    return `<option value="">${escapeHtml(i18nT('group.fwd.select_destination', 'Select a destination…'))}</option>${special
+        .map((item) => `<option value="${item.id}" ${item.id === String(selected || '') ? 'selected' : ''}>${escapeHtml(item.name)}</option>`)
+        .join('')}${groups
         .map((group) => `<option value="${escapeHtml(group.id)}" ${group.id === String(selected || '') ? 'selected' : ''}>${escapeHtml(group.name)}</option>`)
         .join('')}`;
 }
@@ -407,6 +417,17 @@ function forwardRouteHtml(route = {}, index = 0) {
         </select></div></div>
         <p class="cd-help cd-route-full" data-route-topics-status role="status"></p><p class="cd-help cd-route-full hidden" data-route-wildcard-note>${escapeHtml(i18nT('group.fwd.all_topics_route_note', 'This route includes all source topics.'))}</p>
     </fieldset>`;
+}
+
+function appendForwardRoute() {
+    const routes = document.getElementById('fwd-routes');
+    if (!routes) return null;
+    const template = document.createElement('template');
+    template.innerHTML = forwardRouteHtml({}, routes.querySelectorAll('[data-forward-route]').length).trim();
+    const card = template.content.firstElementChild;
+    routes.appendChild(card);
+    void loadForwardRouteOptions(card);
+    return card;
 }
 
 function globalCaptionFields(settings = {}) {
@@ -491,7 +512,7 @@ async function loadTopicOptions(select, groupID, emptyLabel, disableClosed = fal
             .join('')}${selected !== '0' && !availableTopics.some((topic) => String(topic.id) === selected) ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(emptyLabel)} #${escapeHtml(selected)}</option>` : ''}`;
         cacheSearchOptions(select);
         select.disabled = topics.length === 0;
-        if (wrapper) wrapper.classList.toggle('hidden', !isSourceTopic && topics.length === 0);
+        if (wrapper) wrapper.classList.toggle('hidden', topics.length === 0);
         filterSearchOptions(select);
         updateRouteWildcardState();
         const status = select.closest('[data-forward-route]')?.querySelector('[data-route-topics-status]');
@@ -625,9 +646,13 @@ async function loadForwardRouteOptions(route = null) {
     await Promise.all(cards.map(async (card) => {
         const destination = card.querySelector('[data-route-destination]');
         const targetTopic = card.querySelector('[data-route-destination-topic]');
-        if (targetTopic && destination?.value) {
+        if (targetTopic && destination?.value && !['storage', 'me'].includes(destination.value)) {
             await loadTopicOptions(targetTopic, destination.value, i18nT('group.fwd.no_topic', 'No topic'), true);
             targetTopic.dataset.selected = targetTopic.value || '0';
+        } else if (targetTopic) {
+            targetTopic.innerHTML = `<option value="0">${escapeHtml(i18nT('group.fwd.no_topic', 'No topic'))}</option>`;
+            targetTopic.disabled = true;
+            targetTopic.closest('[data-route-destination-topic-wrap]')?.classList.add('hidden');
         }
         card.querySelectorAll('[data-search-select] select').forEach((select) => filterSearchOptions(select));
     }));
@@ -709,12 +734,21 @@ function render() {
     const fwd = g?.autoForward || {};
     const savedRoutes = Array.isArray(fwd.routes) ? fwd.routes : [];
     const forwardRoutes = savedRoutes.filter((route) => String(route?.destinationGroupId || '').trim());
+    if (!forwardRoutes.length && !Array.isArray(fwd.routes) && fwd.destination) {
+        forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: String(fwd.destination) });
+    }
+    if (!forwardRoutes.length && !Array.isArray(fwd.routes) && fwd.enabled === true) {
+        forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: 'storage' });
+    }
+    if (!forwardRoutes.length) forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: '' });
+    const forwardingConfigured = forwardRoutes.length > 0 && forwardRoutes.every((route) => String(route.destinationGroupId || '').trim());
+    const forwardingEnabled = fwd.enabled === true && forwardingConfigured;
     const topics = g?.topics || {};
     const filters = filtersNow();
     const rescue = ['on', 'off', 'auto'].includes(g?.rescueMode) ? g.rescueMode : 'auto';
     const suspended = g?.suspended === true;
     const blocked = blockedNow();
-    const fwdBlocked = isBlockedAccess(g?.forwardAccess) && fwd.enabled === true;
+    const fwdBlocked = isBlockedAccess(g?.forwardAccess) && forwardingEnabled;
     const d = findDialog(cur.id);
 
     el.classList.add('cd-page');
@@ -830,10 +864,9 @@ function render() {
                     id: 'fwd-enable-toggle',
                     label: i18nT('chat.fwd.label', 'Forward new files'),
                     sub: i18nT('group.fwd.subtitle', 'Forward media to another channel'),
-                    on: fwd.enabled === true,
+                    on: forwardingEnabled,
                 })}
                 <div id="fwd-settings" class="cd-sub ${fwd.enabled ? '' : 'hidden'}">
-                    ${fwd.destination && !Array.isArray(fwd.routes) ? `<p class="cd-help cd-legacy-destination">${escapeHtml(i18nT('group.fwd.legacy', 'Existing destination remains active until a topic route is added.'))} <strong>${escapeHtml(fwd.destination === 'me' || fwd.destination === 'storage' ? fwd.destination : getGroupName(fwd.destination, { fallback: cur.name }))}</strong></p>` : ''}
                     ${
                         fwdBlocked
                             ? `<p class="cd-fwd-warn" role="note"><i class="ri-error-warning-line" aria-hidden="true"></i><span>${escapeHtml(
@@ -858,11 +891,11 @@ function render() {
                     <section class="cd-route-section" aria-labelledby="cd-routes-title">
                         <div class="cd-route-heading">
                             <div><h4 id="cd-routes-title" class="cd-subheading">${escapeHtml(i18nT('group.fwd.routes', 'Routes'))}</h4>
-                            <p class="cd-help">${escapeHtml(i18nT('group.fwd.routes_help', 'Choose a destination. Topic options appear only when available.'))}</p></div>
+                            <p class="cd-help">${escapeHtml(i18nT('group.fwd.routes_help', 'Choose a destination for every route. Topic groups also let you route each topic.'))}</p></div>
                             <button type="button" class="tg-btn cd-route-add" data-cd-add-route><i class="ri-add-line" aria-hidden="true"></i><span>${escapeHtml(i18nT('group.fwd.add_route', 'Add route'))}</span></button>
                         </div>
                         <div id="fwd-routes" class="cd-fields">${forwardRoutes.map((route, index) => forwardRouteHtml(route, index)).join('')}</div>
-                        ${!forwardRoutes.length && !fwd.destination ? `<p class="cd-route-empty">${escapeHtml(i18nT('group.fwd.routes_empty', 'No routes yet. Add a route to choose a destination.'))}</p>` : ''}
+                        <p class="cd-help">${escapeHtml(i18nT('group.fwd.destination_required', 'Choose a destination before enabling forwarding.'))}</p>
                     </section>
                 </div>
             </div>
@@ -1193,7 +1226,20 @@ async function flush() {
     inflight = saveChatConfig(target.id, body);
     let ok = false;
     try {
-        const group = await inflight;
+        let group;
+        try {
+            group = await inflight;
+        } catch (e) {
+            if (e?.data?.code !== 'FORWARD_JOB_ACTIVE' || !body.autoForward) throw e;
+            const accepted = await confirmSheet({
+                title: i18nT('group.fwd.reroute_title', 'Change forwarding destination?'),
+                message: i18nT('group.fwd.reroute_confirm', 'The active forward keeps its current destination. Only new files will use this destination.'),
+                confirmLabel: i18nT('group.fwd.reroute_apply', 'Apply to new files'),
+            });
+            if (!accepted) throw e;
+            inflight = saveChatConfig(target.id, { ...body, confirmForwardReroute: true });
+            group = await inflight;
+        }
         ok = true;
         if (cur === target) {
             target.group = group || target.group;
@@ -1454,7 +1500,7 @@ function onClick(e) {
         const select = widget?.querySelector('select');
         if (!select || option.disabled) return;
         select.value = option.dataset.selectOption;
-        select.dataset.selected = select.value;
+        if (!select.matches('[data-route-destination]')) select.dataset.selected = select.value;
         filterSearchOptions(select, '');
         closeSearchSelect(widget);
         select.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1531,16 +1577,14 @@ function onClick(e) {
         return void flush();
     }
     if (t.closest('[data-cd-add-route]')) {
-        const routes = document.getElementById('fwd-routes');
-        if (!routes) return;
-        const template = document.createElement('template');
-        template.innerHTML = forwardRouteHtml({}, routes.querySelectorAll('[data-forward-route]').length).trim();
-        const card = template.content.firstElementChild;
-        routes.appendChild(card);
-        void loadForwardRouteOptions(card);
+        appendForwardRoute();
         return;
     }
     if (t.closest('[data-route-remove]')) {
+        if (document.querySelectorAll('[data-forward-route]').length <= 1) {
+            showToast(i18nT('group.fwd.last_route', 'At least one forwarding route is required.'), 'error');
+            return;
+        }
         t.closest('[data-forward-route]')?.remove();
         updateRouteWildcardState();
         queueSave({ autoForward: { routes: collectForwardRoutes() } }, 0);
@@ -1571,6 +1615,17 @@ function onClick(e) {
                     : i18nT('chat.monitor.sub_off', 'Off — new posts are not downloaded');
             }
         } else if (sw.id === 'fwd-enable-toggle') {
+            if (on) {
+                const routeCount = document.querySelectorAll('[data-forward-route]').length;
+                if (!routeCount) appendForwardRoute();
+                const destinations = [...document.querySelectorAll('[data-route-destination]')].map((select) => select.value.trim());
+                if (!destinations.length || destinations.some((destination) => !destination)) {
+                    document.getElementById('fwd-settings')?.classList.remove('hidden');
+                    document.querySelector('[data-route-destination]')?.closest('[data-search-select]')?.querySelector('[data-select-trigger]')?.focus();
+                    showToast(i18nT('group.fwd.destination_missing', 'Choose a destination for every route before enabling forwarding.'), 'error');
+                    return;
+                }
+            }
             setSwitch(sw.id, on);
             document.getElementById('fwd-settings')?.classList.toggle('hidden', !on);
             queueSave({ autoForward: { enabled: on } });
@@ -1611,7 +1666,7 @@ function onClick(e) {
     }
 }
 
-function onChange(e) {
+async function onChange(e) {
     if (!cur) return;
     const id = e.target.id;
     if (e.target.matches('[data-global-caption-mode]')) {
@@ -1623,10 +1678,40 @@ function onChange(e) {
     } else if (e.target.matches('[data-route-destination]')) {
         const card = e.target.closest('[data-forward-route]');
         const targetTopic = card?.querySelector('[data-route-destination-topic]');
+        const previous = e.target.dataset.selected || '';
+        const next = e.target.value;
+        let confirmForwardReroute = false;
+        if (previous !== next && cur?.id) {
+            let snapshot;
+            try {
+                snapshot = await api.get('/api/queue/snapshot');
+            } catch {
+                e.target.value = previous;
+                filterSearchOptions(e.target);
+                showToast(i18nT('group.fwd.reroute_check_failed', 'Could not check active forwards. Try changing the destination again.'), 'error');
+                return;
+            }
+            const active = (snapshot?.forwardQueue?.items || []).some((item) =>
+                String(item.groupId) === String(cur.id) && item.status === 'processing',
+            );
+            if (active) {
+                const accepted = await confirmSheet({
+                    title: i18nT('group.fwd.reroute_title', 'Change forwarding destination?'),
+                    message: i18nT('group.fwd.reroute_confirm', 'The active forward keeps its current destination. Only new files will use this destination.'),
+                    confirmLabel: i18nT('group.fwd.reroute_apply', 'Apply to new files'),
+                });
+                if (!accepted) {
+                    e.target.value = previous;
+                    filterSearchOptions(e.target);
+                    return;
+                }
+                confirmForwardReroute = true;
+            }
+        }
         e.target.dataset.selected = e.target.value;
         if (targetTopic) {
             targetTopic.dataset.selected = '0';
-            if (e.target.value) {
+            if (e.target.value && !['storage', 'me'].includes(e.target.value)) {
                 void loadTopicOptions(targetTopic, e.target.value, i18nT('group.fwd.no_topic', 'No topic'), true).then(() => filterSearchOptions(targetTopic));
             } else {
                 targetTopic.innerHTML = `<option value="0">${escapeHtml(i18nT('group.fwd.no_topic', 'No topic'))}</option>`;
@@ -1636,7 +1721,7 @@ function onChange(e) {
         }
         filterSearchOptions(e.target);
         updateRouteWildcardState();
-        queueSave({ autoForward: { routes: collectForwardRoutes() } }, 0);
+        queueSave({ autoForward: { routes: collectForwardRoutes() }, ...(confirmForwardReroute ? { confirmForwardReroute: true } : {}) }, 0);
     } else if (e.target.matches('[data-topic-filter-id]') || id === 'topics-mode') {
         const rule = topicsPatch().topics;
         if (cur.group) cur.group.topics = { ...(cur.group.topics || {}), ...rule };

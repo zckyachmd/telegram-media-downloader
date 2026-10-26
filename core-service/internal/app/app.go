@@ -44,6 +44,7 @@ type Config struct {
 	CookieName          string
 	SessionTTL          time.Duration
 	SecureCookies       bool
+	DevMode             bool
 	Output              io.Writer
 }
 type App struct {
@@ -53,7 +54,9 @@ type App struct {
 	apiRL            *rateLimiter
 	monitor          *engine.Controller
 	forwarder        forwardSender
-	forwards         chan forwardJob
+	forwardActivityMu sync.Mutex
+	activeForwards    map[string]int
+	forwards         chan struct{}
 	accounts         *accounts.Repository
 	accountWizard    *accounts.Wizard
 	monitorOp        sync.Mutex
@@ -248,7 +251,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	a.monitor = engine.New(db.Writer, db.Reader, cfg.DataDir, cfg.AccountFactory, a.monitorFilter, a.ingestWork, a.monitorEvent)
 	a.monitor.SetUpdateObserver(a.observeRescueUpdate)
-	a.forwarder, a.forwards = a.monitor, make(chan forwardJob, forwardQueueSize)
+	a.forwarder, a.forwards = a.monitor, make(chan struct{}, 1)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -299,7 +302,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	registerShareRoutes(mux, a)
 	registerReadRoutes(mux, read, a.requireSession)
 	mux.HandleFunc("GET /ws", a.handleWebSocket)
-	mux.Handle("/", newStaticHandler(cfg.Static))
+	mux.Handle("/", newStaticHandler(cfg.Static, cfg.DevMode))
 	registerPublicAPIRoutes(mux, a)
 
 	a.handler = a.transportPolicy(newCompressionPool(level).middleware(a.gateway(mux)))
