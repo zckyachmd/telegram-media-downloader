@@ -106,7 +106,7 @@ This page lists what the current 3.x release (3.4) does. Detailed guides:
 - Live queue with progress, speed and ETA.
 - **Share links**: signed, expiring and revocable links that open without a
   login.
-- Installable **PWA**, dark and light theme, **English and Thai**.
+- Installable **PWA**, dark and light theme, **English, Thai and Indonesian**.
 - Ctrl+K palette to jump to any page, setting or chat.
 
 ## AI (optional)

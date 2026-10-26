@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <meta name="color-scheme" content="dark light">
-    <title>Sign in — Telegram Downloader</title>
+    <title data-i18n="auth.title">Sign in — Telegram Downloader</title>
 
     <!-- Theme bootstrap (mirrors index.html so the lock screen reads the same
          saved choice as the dashboard and the very first paint is the right
@@ -236,16 +236,16 @@
                 <i class="ri-send-plane-2-fill"></i>
             </span>
             <h1 class="text-xl font-semibold mt-4" style="color: var(--tg-text)">Telegram Downloader</h1>
-            <p class="text-sm mt-1" style="color: var(--tg-textSecondary)">Enter your dashboard password to continue.</p>
+            <p class="text-sm mt-1" style="color: var(--tg-textSecondary)" data-i18n="auth.subtitle">Enter your dashboard password to continue.</p>
         </div>
 
         <form id="loginForm" class="space-y-3" autocomplete="on">
-            <label for="password" class="sr-only">Password</label>
-            <input type="password" id="password" name="password" placeholder="Password"
+            <label for="password" class="sr-only" data-i18n="auth.password">Password</label>
+            <input type="password" id="password" name="password" placeholder="Password" data-i18n-placeholder="auth.password"
                 class="tg-input" autocomplete="current-password" required>
 
             <button type="submit" class="tg-btn-primary" id="submitBtn">
-                <i class="ri-login-circle-line align-middle mr-1.5"></i><span>Sign in</span>
+                <i class="ri-login-circle-line align-middle mr-1.5"></i><span data-i18n="auth.sign_in">Sign in</span>
             </button>
 
             <div id="error" class="hidden text-sm text-center"
@@ -255,7 +255,7 @@
 
             <div class="text-center pt-1">
                 <button type="button" id="forgotBtn" class="tg-link">
-                    Forgot password?
+                    <span data-i18n="auth.forgot_password">Forgot password?</span>
                 </button>
             </div>
         </form>
@@ -264,27 +264,32 @@
              clicks "Send token", reads it from `docker compose logs`,
              pastes it back here, and chooses a new password. -->
         <div id="resetPanel" class="hidden reset-panel space-y-3">
-            <h2 class="text-sm font-semibold" style="color: var(--tg-blue)">Reset password</h2>
+            <h2 class="text-sm font-semibold" style="color: var(--tg-blue)" data-i18n="auth.reset_password">Reset password</h2>
             <p class="reset-help">
-                Click <strong style="color: var(--tg-text)">Send token</strong>. The server prints a one-time, 10-minute token to its stdout — read it from
+                <span data-i18n="auth.reset_help_html">Click <strong style="color: var(--tg-text)">Send token</strong>. The server prints a one-time, 10-minute token to its stdout — read it from
                 <code>docker compose logs telegram-downloader</code>, paste it below, and choose a new password.
+                </span>
             </p>
             <button type="button" id="resetSendBtn" class="tg-btn-secondary">
-                <i class="ri-mail-send-line align-middle mr-1"></i>Send token
+                <i class="ri-mail-send-line align-middle mr-1"></i><span data-i18n="auth.send_token">Send token</span>
             </button>
-            <input type="text" id="resetToken" placeholder="Paste token from server logs"
+            <input type="text" id="resetToken" placeholder="Paste token from server logs" data-i18n-placeholder="auth.token_placeholder"
                 class="tg-input" style="font-family: 'IBM Plex Mono', ui-monospace, monospace; font-size: 16px;"
                 autocomplete="off">
-            <input type="password" id="resetNew" placeholder="New password (min 8 chars)" minlength="8"
+            <input type="password" id="resetNew" placeholder="New password (min 8 chars)" data-i18n-placeholder="auth.new_password" minlength="8"
                 class="tg-input">
             <button type="button" id="resetConfirmBtn" class="tg-btn-primary">
-                <i class="ri-key-2-line align-middle mr-1.5"></i>Reset and sign in
+                <i class="ri-key-2-line align-middle mr-1.5"></i><span data-i18n="auth.reset_sign_in">Reset and sign in</span>
             </button>
             <div id="resetMsg" class="hidden text-xs text-center" style="padding: 8px; border-radius: 6px;"></div>
         </div>
     </main>
 
-    <script>
+    <script type="module">
+        import { initI18n, t } from './js/i18n.js';
+        window.t = t;
+        await initI18n();
+
         document.getElementById('loginForm').addEventListener('submit', async (e) => {
             e.preventDefault();
             const password = document.getElementById('password').value;
@@ -293,7 +298,7 @@
             const label = btn.querySelector('span');
 
             btn.disabled = true;
-            label.textContent = 'Verifying…';
+            label.textContent = window.t('auth.verifying');
             errorDiv.classList.add('hidden');
 
             try {
@@ -308,16 +313,16 @@
                 if (data.success) {
                     window.location.href = '/';
                 } else {
-                    errorDiv.textContent = data.error || 'Invalid password';
+                    errorDiv.textContent = data.error || window.t('auth.invalid_password');
                     errorDiv.classList.remove('hidden');
                     btn.disabled = false;
-                    label.textContent = 'Sign in';
+                    label.textContent = window.t('auth.sign_in');
                 }
             } catch (err) {
-                errorDiv.textContent = 'Connection error';
+                errorDiv.textContent = window.t('auth.connection_error');
                 errorDiv.classList.remove('hidden');
                 btn.disabled = false;
-                label.textContent = 'Sign in';
+                label.textContent = window.t('auth.sign_in');
             }
         });
 
@@ -339,7 +344,7 @@
             const btn = e.currentTarget;
             const orig = btn.innerHTML;
             btn.disabled = true;
-            btn.textContent = 'Sending…';
+            btn.textContent = window.t('auth.sending');
             try {
                 const res = await fetch('/api/auth/reset/request', {
                     method: 'POST',
@@ -348,12 +353,12 @@
                 });
                 const data = await res.json();
                 if (res.ok) {
-                    showResetMsg('Token printed to server logs. Check `docker compose logs` and paste it below.', 'ok');
+                    showResetMsg(window.t('auth.token_sent'), 'ok');
                 } else {
-                    showResetMsg(data.error || 'Failed to request token', 'error');
+                    showResetMsg(data.error || window.t('auth.token_request_failed'), 'error');
                 }
             } catch {
-                showResetMsg('Network error', 'error');
+                showResetMsg(window.t('auth.network_error'), 'error');
             } finally {
                 btn.disabled = false;
                 btn.innerHTML = orig;
@@ -364,13 +369,13 @@
             const token = document.getElementById('resetToken').value.trim();
             const newPassword = document.getElementById('resetNew').value;
             if (!token || newPassword.length < 8) {
-                showResetMsg('Token + a password of at least 8 characters required', 'error');
+                showResetMsg(window.t('auth.token_password_required'), 'error');
                 return;
             }
             const btn = e.currentTarget;
             const orig = btn.innerHTML;
             btn.disabled = true;
-            btn.textContent = 'Resetting…';
+            btn.textContent = window.t('auth.resetting');
             try {
                 const res = await fetch('/api/auth/reset/confirm', {
                     method: 'POST',
@@ -379,15 +384,15 @@
                 });
                 const data = await res.json();
                 if (data.success) {
-                    showResetMsg('Password reset. Redirecting…', 'ok');
+                    showResetMsg(window.t('auth.reset_success'), 'ok');
                     setTimeout(() => { window.location.href = '/'; }, 500);
                 } else {
-                    showResetMsg(data.error || 'Reset failed', 'error');
+                    showResetMsg(data.error || window.t('auth.reset_failed'), 'error');
                     btn.disabled = false;
                     btn.innerHTML = orig;
                 }
             } catch {
-                showResetMsg('Network error', 'error');
+                showResetMsg(window.t('auth.network_error'), 'error');
                 btn.disabled = false;
                 btn.innerHTML = orig;
             }

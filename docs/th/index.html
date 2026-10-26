@@ -16,6 +16,7 @@ permalink: /th/
 <link rel="canonical" href="{{ base }}/th/">
 <link rel="alternate" hreflang="en" href="{{ base }}/">
 <link rel="alternate" hreflang="th" href="{{ base }}/th/">
+<link rel="alternate" hreflang="id" href="{{ base }}/id/">
 <link rel="alternate" hreflang="x-default" href="{{ base }}/">
 <meta name="theme-color" content="#0b1424" media="(prefers-color-scheme: dark)">
 <meta name="theme-color" content="#f4f8fc" media="(prefers-color-scheme: light)">
@@ -127,6 +128,7 @@ h1, h2, h3 { line-height: 1.35; letter-spacing: 0; }
       <a class="hide-sm" href="#faq">คำถามที่พบบ่อย</a>
       <a href="{{ '/docs/' | relative_url }}">คู่มือ</a>
       <a href="{{ '/' | relative_url }}" hreflang="en" lang="en">EN</a>
+      <a href="{{ '/id/' | relative_url }}" hreflang="id" lang="id">Indonesia</a>
       <a class="gh" href="{{ site.software.repository }}" rel="noopener">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.6 7.6 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
         <span>GitHub</span><span class="stars" id="stars" hidden></span>
@@ -173,7 +175,7 @@ h1, h2, h3 { line-height: 1.35; letter-spacing: 0; }
     <p class="lead">ล็อกอินด้วยบัญชีของคุณ แล้วโหลดไฟล์จากช่องและกลุ่ม Telegram ได้ทั้งหมด รวมถึงแชตส่วนตัวที่คุณอยู่</p>
     <div class="grid">
       <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0-4-4m4 4 4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/></svg></div><h3>โหลดอัตโนมัติ</h3><p>เฝ้าช่อง กลุ่ม forum topic และแชตส่วนตัวแบบเรียลไทม์ ดึงข้อความย้อนหลังได้และทำต่อหลังรีสตาร์ท โหลดจากลิงก์ <code>t.me</code>, Stories, สื่อที่ตั้งเวลาลบตัวเอง และส่งต่ออัตโนมัติ</p></article>
-      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><h3>หน้าเว็บและแอปบนมือถือ</h3><p>แกลเลอรี คิวโหลดพร้อมความเร็วและเวลาที่เหลือ ตัวดูแบบเต็มจอ และลิงก์แชร์ไฟล์ที่ตั้งวันหมดอายุได้ ติดตั้งเป็นแอปบนมือถือได้ มีภาษาไทย</p></article>
+      <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><h3>หน้าเว็บและแอปบนมือถือ</h3><p>แกลเลอรี คิวโหลดพร้อมความเร็วและเวลาที่เหลือ ตัวดูแบบเต็มจอ และลิงก์แชร์ไฟล์ที่ตั้งวันหมดอายุได้ ติดตั้งเป็นแอปบนมือถือได้ รองรับภาษาอังกฤษ ไทย และอินโดนีเซีย</p></article>
       <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg></div><h3>ไม่โหลดไฟล์ซ้ำ</h3><p>ข้ามไฟล์ที่มีอยู่แล้วก่อนโหลด ตรวจซ้ำด้วย SHA-256 และมีเครื่องมือสแกนหาไฟล์ซ้ำในคลังเพื่อลบทีเดียว</p></article>
       <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg></div><h3>อัปเดตคลิกเดียว</h3><p>กด Install update ในหน้าเว็บ หรือตั้งให้อัปเดตเองตามเวลา ระบบสำรองฐานข้อมูลให้ก่อนทุกครั้ง</p></article>
       <article class="card"><div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4 6v6c0 4.5 3.2 8.2 8 9 4.8-.8 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div><h3>ปลอดภัยตั้งแต่แรก</h3><p>ไม่มีใครเข้าได้จนกว่าจะตั้งรหัสผ่าน มีบัญชีผู้ชมแบบอ่านอย่างเดียว ยกเลิก session ได้ และ session ของ Telegram ถูกเข้ารหัส</p></article>
