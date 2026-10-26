@@ -25,7 +25,7 @@ func (a *App) gateway(next http.Handler) http.Handler {
 			w.Header().Set("Vary", "Accept-Encoding")
 		}
 		if mutatingMethod(r.Method) {
-			if message := originError(r); message != "" {
+			if message := originError(r, a.devMode); message != "" {
 				writeJSONError(w, 403, message)
 				return
 			}
@@ -208,7 +208,7 @@ func adminOnly(w http.ResponseWriter) {
 func mutatingMethod(method string) bool {
 	return method == "POST" || method == "PUT" || method == "PATCH" || method == "DELETE"
 }
-func originError(r *http.Request) string {
+func originError(r *http.Request, devMode bool) string {
 	value := r.Header.Get("Origin")
 	if value == "" {
 		value = r.Header.Get("Referer")
@@ -224,7 +224,7 @@ func originError(r *http.Request) string {
 		return ""
 	}
 	expected := &url.URL{Host: r.Host}
-	if localHost(u.Hostname()) && localHost(expected.Hostname()) && u.Port() == expected.Port() {
+	if localHost(u.Hostname()) && localHost(expected.Hostname()) && (u.Port() == expected.Port() || (devMode && localBootstrap(r, true))) {
 		return ""
 	}
 	return "Cross-origin request blocked"
@@ -236,16 +236,16 @@ func localHost(host string) bool {
 // Proxied bootstrap requests are never considered local. In particular,
 // publishing the dashboard through a loopback reverse proxy must not permit
 // a remote caller to claim the first admin password.
-func localBootstrap(r *http.Request) bool {
-	if r.Header.Get("Forwarded") != "" || r.Header.Get("X-Forwarded-For") != "" {
-		return false
-	}
+func localBootstrap(r *http.Request, devMode bool) bool {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	return devMode || (r.Header.Get("Forwarded") == "" && r.Header.Get("X-Forwarded-For") == "")
 }
 
 func redirect(w http.ResponseWriter, r *http.Request, location string) {

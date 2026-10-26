@@ -48,32 +48,33 @@ type Config struct {
 	Output              io.Writer
 }
 type App struct {
-	httpOptions      HTTPOptions
-	proxyPolicy      proxyPolicy
-	webPolicy        webPolicyCache
-	apiRL            *rateLimiter
-	monitor          *engine.Controller
-	forwarder        forwardSender
+	devMode           bool
+	httpOptions       HTTPOptions
+	proxyPolicy       proxyPolicy
+	webPolicy         webPolicyCache
+	apiRL             *rateLimiter
+	monitor           *engine.Controller
+	forwarder         forwardSender
 	forwardActivityMu sync.Mutex
 	activeForwards    map[string]int
-	forwards         chan struct{}
-	accounts         *accounts.Repository
-	accountWizard    *accounts.Wizard
-	monitorOp        sync.Mutex
-	dialogVersion    uint64 // monitorOp guards confirmed remote removals vs older listings
-	historyMu        sync.Mutex
-	historyJobs      map[string]*historyJob
-	historyCancel    map[string]context.CancelFunc
-	historyDrain     bool
-	ctx              context.Context
-	cancel           context.CancelFunc
-	bootWG           sync.WaitGroup
-	ambientWG        sync.WaitGroup
-	rescueWake       chan struct{}
-	rescueMu         sync.Mutex
-	releaseOwnership func()
-	closeOnce        sync.Once
-	closeErr         error
+	forwards          chan struct{}
+	accounts          *accounts.Repository
+	accountWizard     *accounts.Wizard
+	monitorOp         sync.Mutex
+	dialogVersion     uint64 // monitorOp guards confirmed remote removals vs older listings
+	historyMu         sync.Mutex
+	historyJobs       map[string]*historyJob
+	historyCancel     map[string]context.CancelFunc
+	historyDrain      bool
+	ctx               context.Context
+	cancel            context.CancelFunc
+	bootWG            sync.WaitGroup
+	ambientWG         sync.WaitGroup
+	rescueWake        chan struct{}
+	rescueMu          sync.Mutex
+	releaseOwnership  func()
+	closeOnce         sync.Once
+	closeErr          error
 
 	backups             *backup.Manager
 	db                  *store.DB
@@ -211,7 +212,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		ttl = 7 * 24 * time.Hour
 	}
 	read := dbread.NewHandler(filepath.Join(cfg.DataDir, "db.sqlite"), nil)
-	a := &App{db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("autoUpdate"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbsRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
+	a := &App{devMode: cfg.DevMode, db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("updateStatus"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbsRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
 	a.httpOptions, a.proxyPolicy, a.apiRL = cfg.HTTP, proxy, newRateLimiter(10000, time.Minute)
 	a.seekbar = newSeekbarState()
 	a.faces = newFacesService(a)

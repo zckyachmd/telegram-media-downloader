@@ -266,6 +266,25 @@ func TestAuthSetupLoginAndLogout(t *testing.T) {
 	}
 }
 
+func TestDevSetupAcceptsLoopbackProxy(t *testing.T) {
+	a, err := New(context.Background(), Config{DataDir: t.TempDir(), Port: 0, DevMode: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	body, _ := json.Marshal(map[string]string{"password": "correct horse"})
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewReader(body))
+	req.Host = "127.0.0.1:3003"
+	req.Header.Set("Origin", "http://localhost:3002")
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	rr := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("proxied dev setup = %d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestPinMutationRunsThroughWriterAndBroadcasts(t *testing.T) {
 	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir(), Port: 0})
 	if err != nil {

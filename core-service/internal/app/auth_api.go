@@ -111,7 +111,7 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 409, "Already configured — use POST /api/auth/change-password")
 		return
 	}
-	if !localBootstrap(r) {
+	if !localBootstrap(r, a.devMode) {
 		writeJSONError(w, 403, "Initial setup must be done from the local machine. Run `tgdl-server setup --password-stdin` on the host or inside the running container.")
 		return
 	}
