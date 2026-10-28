@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -31,6 +32,10 @@ func TestThumbFileRejectsStub(t *testing.T) {
 func TestRenderGalleryThumbStill(t *testing.T) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		t.Skip("ffmpeg not installed")
+	}
+	encoders, err := exec.Command("ffmpeg", "-hide_banner", "-encoders").Output()
+	if err != nil || !bytes.Contains(encoders, []byte("libwebp")) {
+		t.Skip("ffmpeg built without the libwebp encoder")
 	}
 	dir := t.TempDir()
 	src := filepath.Join(dir, "in.png")
