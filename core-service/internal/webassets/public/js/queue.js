@@ -536,11 +536,16 @@ function renderForwardQueue(data) {
         const statusKey = statuses[item.status];
         const status = statusKey ? i18nT(statusKey, item.status) : (item.status || '—');
         const reason = item.reason ? `<span class="text-red-400/80 truncate">${escapeHtml(item.reason)}</span>` : '';
+        const destinationsDetail = (item.destinationStates || []).map((d) => `${d.method || '—'} · ${d.status || 'pending'}${d.settings?.protect ? ' · protected' : ''}`).join('; ');
+        const retry = ['failed', 'interrupted'].includes(item.status)
+            ? `<button type="button" class="tg-btn tg-btn-sm" data-forward-retry="${escapeHtml(item.id)}">${escapeHtml(i18nT('queue.forward.retry', 'Retry failed destinations'))}</button>`
+            : '';
         return `<div class="py-2 text-xs flex flex-col sm:flex-row sm:items-center gap-x-3 gap-y-1">
             <span class="min-w-0 flex-1"><span class="text-tg-text">${escapeHtml(item.fileName || `#${item.messageId}`)}</span>
                 <span class="text-tg-textSecondary"> · ${escapeHtml(group)} · #${escapeHtml(item.messageId)}</span></span>
             <span class="text-tg-textSecondary truncate" title="${escapeHtml(destinations)}">${escapeHtml(i18nT('queue.forward.destination', 'To'))}: ${escapeHtml(destinations)}</span>
-            <span class="shrink-0 text-tg-textSecondary">${escapeHtml(status)}</span>${reason}
+            <span class="shrink-0 text-tg-textSecondary">${escapeHtml(status)} · ${escapeHtml(item.stage || '—')}</span>${reason}
+            ${destinationsDetail ? `<span class="text-tg-textSecondary">${escapeHtml(destinationsDetail)}</span>` : ''}${retry}
         </div>`;
     }).join('');
 }
@@ -738,6 +743,19 @@ function handleWs(msg) {
         // is already O(1) via statusCounts.
     }
 }
+
+document.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-forward-retry]');
+    if (!button) return;
+    button.disabled = true;
+    try {
+        await api.post(`/api/forward-queue/${encodeURIComponent(button.dataset.forwardRetry)}/retry`, {});
+        loadSnapshot();
+    } catch (error) {
+        showToast(error?.message || 'Retry failed', 'error');
+        button.disabled = false;
+    }
+});
 
 // ============ Filtering / sorting / search ============
 let _filteredCache = null;

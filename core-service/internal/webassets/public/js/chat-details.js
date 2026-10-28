@@ -698,6 +698,7 @@ async function loadGroupTopicFilterOptions() {
                 ${topic.closed ? `<span class="cd-topic-badge">${escapeHtml(i18nT('group.fwd.closed', 'closed'))}</span>` : ''}
             </label>`).join('');
         updateTopicFilterCount();
+        renderTopicProtection(topics);
     } catch (error) {
         if (list.isConnected) list.innerHTML = `<span class="cd-help" role="status">${escapeHtml(error?.data?.message || error?.data?.error || i18nT('group.fwd.topics_error', 'Connect a Telegram account to load topic names.'))}</span>`;
     }
@@ -742,7 +743,7 @@ function render() {
     }
     if (!forwardRoutes.length) forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: '' });
     const forwardingConfigured = forwardRoutes.length > 0 && forwardRoutes.every((route) => String(route.destinationGroupId || '').trim());
-    const forwardingEnabled = fwd.enabled === true && forwardingConfigured;
+    const forwardingEnabled = fwd.enabled === true;
     const topics = g?.topics || {};
     const filters = filtersNow();
     const rescue = ['on', 'off', 'auto'].includes(g?.rescueMode) ? g.rescueMode : 'auto';
@@ -866,7 +867,7 @@ function render() {
                     sub: i18nT('group.fwd.subtitle', 'Forward media to another channel'),
                     on: forwardingEnabled,
                 })}
-                <div id="fwd-settings" class="cd-sub ${fwd.enabled ? '' : 'hidden'}">
+                <div id="fwd-settings" class="cd-sub ${forwardingEnabled ? '' : 'hidden'}">
                     ${
                         fwdBlocked
                             ? `<p class="cd-fwd-warn" role="note"><i class="ri-error-warning-line" aria-hidden="true"></i><span>${escapeHtml(
@@ -879,14 +880,25 @@ function render() {
                             : ''
                     }
                     ${switchRow({
+                        id: 'fwd-protect-toggle',
+                        label: i18nT('group.fwd.protect_default', 'Protect forwarded copies in this group'),
+                        sub: fwd.protect == null
+                            ? i18nT('group.fwd.protection_inherit', 'Following global protection rule')
+                            : i18nT('group.fwd.protection_override', 'Overrides global protection rule'),
+                        on: fwd.protect == null ? false : fwd.protect === true || fwd.protect === 'on',
+                    })}
+                    ${switchRow({
                         id: 'fwd-delete-toggle',
                         label: i18nT('group.fwd.delete_after', 'Delete after forward'),
-                        sub: i18nT(
-                            'group.fwd.delete_after_help',
-                            'Remove local file after successful upload.',
-                        ),
+                        sub: i18nT('group.fwd.delete_after_help', 'Remove local file after successful upload.'),
                         on: fwd.deleteAfterForward === true,
                     })}
+                    ${fwd.deleteAfterForward === true ? switchRow({
+                        id: 'fwd-direct-toggle',
+                        label: i18nT('group.fwd.direct', 'Forward without downloading'),
+                        sub: i18nT('group.fwd.direct_help', 'The media will not be saved to the local library.'),
+                        on: fwd.directForward !== false,
+                    }) : ''}
                     ${globalCaptionFields(fwd)}
                     <section class="cd-route-section" aria-labelledby="cd-routes-title">
                         <div class="cd-route-heading">
@@ -895,7 +907,7 @@ function render() {
                             <button type="button" class="tg-btn cd-route-add" data-cd-add-route><i class="ri-add-line" aria-hidden="true"></i><span>${escapeHtml(i18nT('group.fwd.add_route', 'Add route'))}</span></button>
                         </div>
                         <div id="fwd-routes" class="cd-fields">${forwardRoutes.map((route, index) => forwardRouteHtml(route, index)).join('')}</div>
-                        <p class="cd-help">${escapeHtml(i18nT('group.fwd.destination_required', 'Choose a destination before enabling forwarding.'))}</p>
+                        <p class="cd-help ${forwardingConfigured ? 'hidden' : ''}" role="status" data-forward-route-required>${escapeHtml(i18nT('group.fwd.destination_required', 'Choose a destination before forwarding can start.'))}</p>
                     </section>
                 </div>
             </div>
@@ -1250,6 +1262,12 @@ async function flush() {
                 document.getElementById('cd-danger')?.classList.remove('hidden');
                 setSwitch('group-enable-toggle', monitoringNow(), monitorSub());
             }
+            const savedForward = group?.autoForward || {};
+            if (savedForward.enabled !== true && document.getElementById('fwd-enable-toggle')?.getAttribute('aria-checked') === 'true') {
+                setSwitch('fwd-enable-toggle', false);
+                document.getElementById('fwd-settings')?.classList.remove('hidden');
+                document.querySelector('[data-forward-route-required]')?.classList.remove('hidden');
+            }
         }
     } catch (e) {
         if (cur === target) {
@@ -1587,7 +1605,10 @@ function onClick(e) {
         }
         t.closest('[data-forward-route]')?.remove();
         updateRouteWildcardState();
-        queueSave({ autoForward: { routes: collectForwardRoutes() } }, 0);
+        const routes = collectForwardRoutes();
+        const configured = routes.length > 0 && [...document.querySelectorAll('[data-route-destination]')].every((select) => select.value.trim());
+        document.querySelector('[data-forward-route-required]')?.classList.toggle('hidden', configured);
+        queueSave({ autoForward: { routes, ...(configured && document.getElementById('fwd-enable-toggle')?.getAttribute('aria-checked') === 'true' ? { enabled: true } : {}) } }, 0);
         return;
     }
     if (t.closest('[data-cd-pick]')) return void openDestinationPicker();
@@ -1620,18 +1641,44 @@ function onClick(e) {
                 if (!routeCount) appendForwardRoute();
                 const destinations = [...document.querySelectorAll('[data-route-destination]')].map((select) => select.value.trim());
                 if (!destinations.length || destinations.some((destination) => !destination)) {
+                    setSwitch(sw.id, true);
                     document.getElementById('fwd-settings')?.classList.remove('hidden');
                     document.querySelector('[data-route-destination]')?.closest('[data-search-select]')?.querySelector('[data-select-trigger]')?.focus();
-                    showToast(i18nT('group.fwd.destination_missing', 'Choose a destination for every route before enabling forwarding.'), 'error');
+                    document.querySelector('[data-forward-route-required]')?.classList.remove('hidden');
                     return;
                 }
+            } else {
+                setSwitch(sw.id, false);
+                document.getElementById('fwd-settings')?.classList.add('hidden');
+                queueSave({ autoForward: { enabled: false } });
+                return;
             }
             setSwitch(sw.id, on);
             document.getElementById('fwd-settings')?.classList.toggle('hidden', !on);
-            queueSave({ autoForward: { enabled: on } });
+            queueSave({ autoForward: { enabled: true } });
         } else if (sw.id === 'fwd-delete-toggle') {
+            const autoForward = { deleteAfterForward: on };
+            if (!on) autoForward.directForward = false;
+            queueSave({ autoForward });
+            cur.group.autoForward = { ...(cur.group.autoForward || {}), ...autoForward };
+            const directToggle = document.getElementById('fwd-direct-toggle');
+            if (!on) directToggle?.remove();
+            else if (!directToggle) {
+                const template = document.createElement('template');
+                template.innerHTML = switchRow({
+                    id: 'fwd-direct-toggle',
+                    label: i18nT('group.fwd.direct', 'Forward without downloading'),
+                    sub: i18nT('group.fwd.direct_help', 'The media will not be saved to the local library.'),
+                    on: cur.group.autoForward.directForward !== false,
+                });
+                document.getElementById('fwd-delete-toggle')?.after(template.content.firstElementChild);
+            }
+        } else if (sw.id === 'fwd-direct-toggle') {
             setSwitch(sw.id, on);
-            queueSave({ autoForward: { deleteAfterForward: on } });
+            queueSave({ autoForward: { directForward: on } });
+        } else if (sw.id === 'fwd-protect-toggle') {
+            setSwitch(sw.id, on);
+            queueSave({ autoForward: { protect: on } });
         } else if (sw.id === 'topics-enable-toggle') {
             setSwitch(sw.id, on);
             const rule = topicsPatch().topics;
@@ -1721,7 +1768,14 @@ async function onChange(e) {
         }
         filterSearchOptions(e.target);
         updateRouteWildcardState();
-        queueSave({ autoForward: { routes: collectForwardRoutes() }, ...(confirmForwardReroute ? { confirmForwardReroute: true } : {}) }, 0);
+        const routes = collectForwardRoutes();
+        const configured = routes.length > 0 && [...document.querySelectorAll('[data-route-destination]')].every((select) => select.value.trim());
+        document.querySelector('[data-forward-route-required]')?.classList.toggle('hidden', configured);
+        if (configured && document.getElementById('fwd-enable-toggle')?.getAttribute('aria-checked') === 'true') {
+            queueSave({ autoForward: { routes, enabled: true }, ...(confirmForwardReroute ? { confirmForwardReroute: true } : {}) }, 0);
+        } else {
+            queueSave({ autoForward: { routes }, ...(confirmForwardReroute ? { confirmForwardReroute: true } : {}) }, 0);
+        }
     } else if (e.target.matches('[data-topic-filter-id]') || id === 'topics-mode') {
         const rule = topicsPatch().topics;
         if (cur.group) cur.group.topics = { ...(cur.group.topics || {}), ...rule };
@@ -1734,7 +1788,12 @@ async function onChange(e) {
             filterSearchOptions(e.target);
             updateRouteWildcardState();
         }
-        queueSave({ autoForward: { routes: collectForwardRoutes() } }, 0);
+        const routes = collectForwardRoutes();
+        const configured = routes.length > 0 && [...document.querySelectorAll('[data-route-destination]')].every((select) => select.value.trim());
+        document.querySelector('[data-forward-route-required]')?.classList.toggle('hidden', configured);
+        if (configured && document.getElementById('fwd-enable-toggle')?.getAttribute('aria-checked') === 'true') {
+            queueSave({ autoForward: { routes, enabled: true } }, 0);
+        } else queueSave({ autoForward: { routes } }, 0);
     } else if (id === 'fwd-destination') {
         queueSave({ autoForward: { destination: e.target.value.trim() } }, 0);
     } else if (id === 'setting-rescue-hours') {

@@ -10,12 +10,41 @@ import (
 type fileSender interface {
 	SendFile(context.Context, telegram.SendFileRequest) (int, error)
 }
+type messageForwarder interface {
+	ForwardMessage(context.Context, telegram.ForwardMessageRequest) (int, error)
+}
 
 // Observing reports whether the monitor is running live (not only connected
 // for manual jobs). 2.x auto-forwarded only while its runtime was running.
 func (c *Controller) Observing() bool {
 	run, err := c.queueRun()
 	return err == nil && run.observing.Load()
+}
+
+func (c *Controller) ForwardMessage(ctx context.Context, accountID string, req telegram.ForwardMessageRequest) (string, int, error) {
+	run, err := c.queueRun()
+	if err != nil {
+		return "", 0, err
+	}
+	if run.accounts[accountID] == nil {
+		if len(run.ids) == 0 {
+			return "", 0, ErrEngineNotRunning
+		}
+		accountID = run.ids[0]
+	}
+	forwarder, ok := run.accounts[accountID].(messageForwarder)
+	if !ok {
+		return accountID, 0, errors.New("account cannot forward messages")
+	}
+	run.jobUsers.Add(1)
+	defer run.jobUsers.Add(-1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if run.ctx != nil {
+		defer context.AfterFunc(run.ctx, cancel)()
+	}
+	id, err := forwarder.ForwardMessage(ctx, req)
+	return accountID, id, err
 }
 
 // SendFile uploads through the requested account, or the first loaded

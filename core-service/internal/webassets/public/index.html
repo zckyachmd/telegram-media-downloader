@@ -864,6 +864,12 @@
                         <p id="engine-error" class="engine-error hidden"></p>
                     </section>
 
+                    <section class="bg-tg-panel rounded-xl p-4 mb-6" data-admin-only aria-labelledby="settings-forward-protection-title">
+                        <h3 id="settings-forward-protection-title" class="text-tg-text text-sm font-semibold mb-2" data-i18n="settings.forward.protection">Forward protection</h3>
+                        <label class="cd-topic-option"><input id="setting-forward-protect-default" type="checkbox" class="cd-checkbox-input"><span class="cd-checkbox-control" aria-hidden="true"><i class="ri-check-line"></i></span><span class="cd-topic-name" data-i18n="settings.forward.protect_default">Protect forwarded copies by default</span></label>
+                        <p class="text-xs text-tg-textSecondary mt-2" data-i18n="settings.forward.protection_help">Protected copies are downloaded and uploaded. Groups can override this default.</p>
+                    </section>
+
                     <!-- Tools — what used to be the Maintenance hub. What needs
                          attention first, then the four groups; each group page
                          has a card per tool (js/tools-hub.js). #/settings/tools
@@ -4146,6 +4152,9 @@
         <button id="selection-zip" type="button" class="selection-action px-3 py-1 rounded-full bg-tg-blue/20 text-tg-blue hover:bg-tg-blue/30"
             data-i18n-title="viewer.selection.zip" title="Download ZIP">
             <i class="ri-archive-line" aria-hidden="true"></i> <span data-i18n="viewer.selection.zip">Download ZIP</span>
+        </button>
+        <button id="selection-forward" type="button" class="selection-action px-3 py-1 rounded-full bg-green-500/20 text-green-300 hover:bg-green-500/30" data-admin-only title="Forward selected media">
+            <i class="ri-send-plane-line" aria-hidden="true"></i> <span>Forward</span>
         </button>
         <button id="selection-pin" type="button" class="selection-action px-3 py-1 rounded-full bg-yellow-500/20 text-yellow-300 hover:bg-yellow-500/30" data-admin-only
             data-i18n-title="favorites.pin" title="Pin">

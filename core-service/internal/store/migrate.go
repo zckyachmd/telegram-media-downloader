@@ -158,6 +158,7 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, err
 	}
 	hasForwardConfig := false
+	hasForwardStage, hasForwardDestinations, hasForwardAttempts := false, false, false
 	for columns.Next() {
 		var cid, notNull, primaryKey int
 		var name, kind string
@@ -169,6 +170,15 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 		if name == "forward_config_json" {
 			hasForwardConfig = true
 		}
+		if name == "stage" {
+			hasForwardStage = true
+		}
+		if name == "destinations_json" {
+			hasForwardDestinations = true
+		}
+		if name == "attempts" {
+			hasForwardAttempts = true
+		}
 	}
 	if err := columns.Close(); err != nil {
 		return 0, err
@@ -176,6 +186,21 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 	if !hasForwardConfig {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN forward_config_json TEXT NOT NULL DEFAULT '{}'`); err != nil {
 			return 0, fmt.Errorf("add forward queue config snapshot: %w", err)
+		}
+	}
+	if !hasForwardStage {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN stage TEXT NOT NULL DEFAULT 'forward'`); err != nil {
+			return 0, err
+		}
+	}
+	if !hasForwardDestinations {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN destinations_json TEXT NOT NULL DEFAULT '[]'`); err != nil {
+			return 0, err
+		}
+	}
+	if !hasForwardAttempts {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return 0, err
 		}
 	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_forward_queue_status ON tgdl_forward_queue(status,id)`); err != nil {

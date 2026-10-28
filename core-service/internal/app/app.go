@@ -250,7 +250,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	if err := a.drainFileCleanup(ctx); err != nil && cfg.Output != nil {
 		fmt.Fprintf(cfg.Output, "Media cleanup remains pending: %v\n", err)
 	}
-	a.monitor = engine.New(db.Writer, db.Reader, cfg.DataDir, cfg.AccountFactory, a.monitorFilter, a.ingestWork, a.monitorEvent)
+	a.monitor = engine.New(db.Writer, db.Reader, cfg.DataDir, cfg.AccountFactory, a.monitorFilter, engine.ForwardSinkAdapter{ForwardSink: engine.ForwardSink(a.ingestWorkWithForward)}, a.monitorEvent)
 	a.monitor.SetUpdateObserver(a.observeRescueUpdate)
 	a.forwarder, a.forwards = a.monitor, make(chan struct{}, 1)
 	mux := http.NewServeMux()
@@ -268,6 +268,9 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	mux.Handle("POST /api/auth/reset/confirm", a.loginRL.middleware(http.HandlerFunc(a.handleResetConfirm)))
 	mux.Handle("POST /api/downloads/pin", a.requireAdmin(http.HandlerFunc(a.handleBatchPin)))
 	mux.Handle("POST /api/downloads/{id}/pin", a.requireAdmin(http.HandlerFunc(a.handlePin)))
+	mux.Handle("POST /api/forward-queue", a.requireAdmin(http.HandlerFunc(a.handleManualForwardEnqueue)))
+	mux.Handle("POST /api/forward-queue/{id}/retry", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueRetry)))
+	mux.Handle("PUT /api/forwarding/default-protection", a.requireAdmin(http.HandlerFunc(a.handleGlobalForwardProtection)))
 	mux.Handle("GET /api/jobs", a.requireSession(http.HandlerFunc(a.handleJobs)))
 	mux.Handle("GET /api/jobs/{id}", a.requireSession(http.HandlerFunc(a.handleJob)))
 	mux.Handle("POST /api/jobs/{id}/cancel", a.requireAdmin(http.HandlerFunc(a.handleJobCancel)))

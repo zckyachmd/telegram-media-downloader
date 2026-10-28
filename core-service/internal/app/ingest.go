@@ -2,13 +2,15 @@ package app
 
 import (
 	"context"
+	"errors"
+	"strconv"
+
 	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/rescue"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 	"github.com/gotd/td/tg"
-	"strconv"
 )
 
 // IngestTelegram is the common application boundary for live messages and
@@ -17,6 +19,10 @@ func (a *App) IngestTelegram(ctx context.Context, message *tg.Message, groupName
 	return a.ingestTelegram(ctx, message, "", groupName, "", transport)
 }
 func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, groupName, accountID string, transport telegram.MediaDownloader) (download.Record, error) {
+	return a.ingestTelegramWithForward(ctx, message, groupID, groupName, accountID, transport, nil)
+}
+
+func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message, groupID, groupName, accountID string, transport telegram.MediaDownloader, directForward func(context.Context, telegram.ForwardMessageRequest) error) (download.Record, error) {
 	a.mediaMu.RLock()
 	defer a.mediaMu.RUnlock()
 	if err := a.mediaWritable(ctx); err != nil {
@@ -53,6 +59,64 @@ func (a *App) ingestTelegram(ctx context.Context, message *tg.Message, groupID, 
 	forward, forwardSettings, forwardAccountID, err := a.forwardCandidate(ctx, item.GroupID, item.MessageID)
 	if err != nil {
 		return download.Record{}, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
+	}
+	if forward && forwardSettings["deleteAfterForward"] == true && forwardSettings["directForward"] != false && directForward != nil && ttl == 0 && !item.SkipDuplicates && len(matchingForwardRoutes(forwardSettings, telegram.MessageTopicID(message))) > 0 {
+		cfg, _ := a.config.Load(ctx)
+		topicID := telegram.MessageTopicID(message)
+		needsUpload := false
+		var destinations []forwardDestination
+		for _, route := range matchingForwardRoutes(forwardSettings, topicID) {
+			settings := effectiveForwardProtection(inheritCaptionSettings(route, forwardSettings), forwardSettings, route, topicID, cfg)
+			destinations = append(destinations, forwardDestination{Settings: settings, Status: "pending"})
+			if settings["protect"] == true || customCaption(settings) {
+				needsUpload = true
+			}
+		}
+		if len(destinations) > 0 && !needsUpload {
+			job := forwardJob{groupID: item.GroupID, groupName: groupName, fileName: attachment.Name, messageID: message.ID, topicID: topicID, text: message.Message, historyID: attemptID, facts: attachment.Facts, settings: forwardSettings, accountID: forwardAccountID, stage: "native_forward", destinations: destinations}
+			job.directForward = directForward
+			if !a.reserveForward(job) {
+				return download.Record{}, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, errors.New("forward queue is full"))
+			}
+			if err := a.directForwardNow(ctx, &job); err != nil {
+				record, downloadErr := a.library.Ingest(ctx, item, telegram.AttachmentClient{Source: transport, Media: attachment})
+				if downloadErr != nil {
+					a.updateForwardReservation(ctx, job, "failed", downloadErr.Error())
+					return record, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, downloadErr)
+				}
+				job.path, job.recordID = record.Path, record.ID
+				for i := range job.destinations {
+					if job.destinations[i].Status == "forwarded" {
+						continue
+					}
+					settings := job.destinations[i].Settings
+					if toString(settings["captionMode"]) == "native" {
+						settings = cloneMap(settings)
+						settings["captionMode"] = "source_info"
+					}
+					if !a.forwardToRoute(ctx, job, forwardAccountID, settings, false) {
+						err := errors.New("direct forward failed and upload fallback failed")
+						a.updateForwardReservation(ctx, job, "failed", err.Error())
+						a.failProcessingForward(context.WithoutCancel(ctx), attemptID, err)
+						return record, err
+					}
+					job.destinations[i].Status, job.destinations[i].Method = "forwarded", "upload"
+				}
+				if err := a.finishProcessingAttempt(ctx, attemptID, "downloaded", "", record.SHA256, "forwarded"); err != nil {
+					return record, err
+				}
+				job.stage = "complete"
+				a.updateForwardReservation(ctx, job, "forwarded", "")
+				a.finishProcessingForward(ctx, attemptID, "forwarded")
+				return record, nil
+			}
+			if err := a.finishProcessingAttempt(ctx, attemptID, "forwarded_direct", "", "", "forwarded"); err != nil {
+				return download.Record{}, err
+			}
+			a.updateForwardReservation(ctx, job, "forwarded", "")
+			a.finishProcessingForward(ctx, attemptID, "forwarded")
+			return download.Record{}, nil
+		}
 	}
 	record, err := a.library.Ingest(ctx, item, telegram.AttachmentClient{Source: transport, Media: attachment})
 	if err != nil {

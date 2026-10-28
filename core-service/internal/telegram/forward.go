@@ -41,6 +41,13 @@ type SendFileRequest struct {
 	Facts       MediaFacts
 	Caption     string
 	Entities    []tg.MessageEntityClass
+	Protect     bool
+}
+
+type ForwardMessageRequest struct {
+	Source, Destination string
+	MessageID, TopicID  int
+	Protect             bool
 }
 
 type forwardAPI interface {
@@ -49,7 +56,40 @@ type forwardAPI interface {
 	dialogsAPI
 	ContactsResolvePhone(context.Context, string) (*tg.ContactsResolvedPeer, error)
 	MessagesSendMedia(context.Context, *tg.MessagesSendMediaRequest) (tg.UpdatesClass, error)
+	MessagesForwardMessages(context.Context, *tg.MessagesForwardMessagesRequest) (tg.UpdatesClass, error)
 	ChannelsCreateChannel(context.Context, *tg.ChannelsCreateChannelRequest) (tg.UpdatesClass, error)
+}
+
+func (a *Account) ForwardMessage(ctx context.Context, req ForwardMessageRequest) (int, error) {
+	if a == nil || a.API() == nil {
+		return 0, errors.New("Telegram account is not connected")
+	}
+	a.senderOnce.Do(func() { a.sender = &fileSender{api: a.API(), resolve: a.ResolveDialog, scan: a.RecoveryDialogs} })
+	return a.sender.forward(ctx, req)
+}
+
+func (s *fileSender) forward(ctx context.Context, req ForwardMessageRequest) (int, error) {
+	if req.MessageID <= 0 {
+		return 0, errors.New("invalid Telegram message id")
+	}
+	source, err := s.destination(ctx, req.Source)
+	if err != nil {
+		return 0, fmt.Errorf("resolve source: %w", err)
+	}
+	destination, err := s.destination(ctx, req.Destination)
+	if err != nil {
+		return 0, fmt.Errorf("resolve destination: %w", err)
+	}
+	var random [8]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return 0, err
+	}
+	id := int64(binary.LittleEndian.Uint64(random[:]))
+	updates, err := s.api.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{FromPeer: source, ID: []int{req.MessageID}, RandomID: []int64{id}, ToPeer: destination, TopMsgID: req.TopicID, Noforwards: req.Protect})
+	if err != nil {
+		return 0, err
+	}
+	return sentMessageID(updates, id), nil
 }
 
 // fileSender keeps the destinations it resolved for one account, so a busy
@@ -98,7 +138,7 @@ func (s *fileSender) send(ctx context.Context, req SendFileRequest) (int, error)
 	}
 	randomID := int64(binary.LittleEndian.Uint64(random[:]))
 	updates, err := s.api.MessagesSendMedia(ctx, &tg.MessagesSendMediaRequest{
-		Peer: peer, ReplyTo: forwardTopicReply(req.TopicID), Media: uploadedMedia(file, req), Message: req.Caption, Entities: req.Entities, RandomID: randomID,
+		Peer: peer, ReplyTo: forwardTopicReply(req.TopicID), Media: uploadedMedia(file, req), Message: req.Caption, Entities: req.Entities, RandomID: randomID, Noforwards: req.Protect,
 	})
 	if err != nil {
 		return 0, err

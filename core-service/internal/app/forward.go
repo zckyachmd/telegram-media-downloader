@@ -9,9 +9,11 @@ import (
 	"io"
 	"math"
 	"math/rand/v2"
+	"net/http"
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +36,9 @@ type forwardSender interface {
 	Observing() bool
 	SendFile(context.Context, string, telegram.SendFileRequest) (string, int, error)
 }
+type nativeForwardSender interface {
+	ForwardMessage(context.Context, string, telegram.ForwardMessageRequest) (string, int, error)
+}
 
 type forwardJob struct {
 	queueID            int64
@@ -48,11 +53,48 @@ type forwardJob struct {
 	facts              telegram.MediaFacts
 	settings           map[string]any
 	accountID          string
+	stage              string
+	destinations       []forwardDestination
+	attempts           int
+	directForward      func(context.Context, telegram.ForwardMessageRequest) error
+}
+
+type forwardDestination struct {
+	Settings map[string]any `json:"settings"`
+	Status   string         `json:"status"`
+	Method   string         `json:"method"`
+	Reason   string         `json:"reason,omitempty"`
 }
 
 type forwardConfigSnapshot struct {
-	Settings  map[string]any `json:"settings"`
-	AccountID string         `json:"accountId"`
+	Settings     map[string]any       `json:"settings"`
+	AccountID    string               `json:"accountId"`
+	Destinations []forwardDestination `json:"destinations,omitempty"`
+}
+
+func (a *App) handleForwardProtection(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Protect bool `json:"protect"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		return
+	}
+	cfg, err := a.config.Load(r.Context())
+	if err != nil {
+		writeJSONError(w, 500, err.Error())
+		return
+	}
+	forwarding, _ := cfg["forwarding"].(map[string]any)
+	if forwarding == nil {
+		forwarding = map[string]any{}
+	}
+	forwarding["protect"] = body.Protect
+	cfg["forwarding"] = forwarding
+	if err := a.config.Save(r.Context(), cfg); err != nil {
+		writeJSONError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true})
 }
 
 const (
@@ -73,12 +115,21 @@ func (a *App) queueForward(job forwardJob) {
 		}
 		job.settings, job.accountID, _ = forwardSettings(cfg, job.groupID)
 	}
+	if job.stage == "" {
+		job.stage = "metadata"
+	}
 	facts, err := json.Marshal(job.facts)
 	if err != nil {
 		a.forwardFailed(job, "", err)
 		return
 	}
-	forwardConfig, err := json.Marshal(forwardConfigSnapshot{Settings: job.settings, AccountID: job.accountID})
+	globalConfig, _ := a.config.Load(ctx)
+	var resolved []forwardDestination
+	for _, route := range matchingForwardRoutes(job.settings, job.topicID) {
+		settings := effectiveForwardProtection(inheritCaptionSettings(route, job.settings), job.settings, route, job.topicID, globalConfig)
+		resolved = append(resolved, forwardDestination{Settings: settings, Status: "pending"})
+	}
+	forwardConfig, err := json.Marshal(forwardConfigSnapshot{Settings: job.settings, AccountID: job.accountID, Destinations: resolved})
 	if err != nil {
 		a.forwardFailed(job, "", err)
 		return
@@ -99,8 +150,8 @@ func (a *App) queueForward(job forwardJob) {
 	if queued >= queueLimit {
 		now := time.Now().UnixMilli()
 		reason := "auto-forward queue is full"
-		err = tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,status,reason,created_at,updated_at,completed_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,'failed',?,?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, path.Base(job.path), job.topicID, job.text, job.recordID, job.path, string(facts), string(forwardConfig), reason, now, now, now).Scan(&job.queueID)
+		err = tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,status,reason,stage,created_at,updated_at,completed_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,'failed',?,'enqueue',?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, job.topicID, job.text, job.recordID, job.path, string(facts), string(forwardConfig), reason, now, now, now).Scan(&job.queueID)
 		if err == nil {
 			err = tx.Commit()
 		} else {
@@ -115,8 +166,11 @@ func (a *App) queueForward(job forwardJob) {
 		return
 	}
 	now := time.Now().UnixMilli()
-	err = tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, path.Base(job.path), job.topicID, job.text, job.recordID, job.path, string(facts), string(forwardConfig), now, now).Scan(&job.queueID)
+	if job.fileName == "" && job.path != "" {
+		job.fileName = path.Base(job.path)
+	}
+	err = tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, job.fileName, job.topicID, job.text, job.recordID, job.path, string(facts), string(forwardConfig), job.stage, now, now).Scan(&job.queueID)
 	if err != nil {
 		_ = tx.Rollback()
 		a.forwardFailed(job, "", err)
@@ -131,6 +185,68 @@ func (a *App) queueForward(job forwardJob) {
 	case a.forwards <- struct{}{}:
 	default:
 	}
+}
+
+func (a *App) reserveForward(job forwardJob) bool {
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	facts, err := json.Marshal(job.facts)
+	if err != nil {
+		return false
+	}
+	forwardConfig, err := json.Marshal(forwardConfigSnapshot{Settings: job.settings, AccountID: job.accountID, Destinations: job.destinations})
+	if err != nil {
+		return false
+	}
+	limit := a.forwarderConfig(ctx).queueSize
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return false
+	}
+	defer tx.Rollback()
+	var queued int
+	if tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing')`).Scan(&queued) != nil || queued >= limit {
+		return false
+	}
+	now := time.Now().UnixMilli()
+	if tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, job.fileName, job.topicID, job.text, 0, "", string(facts), string(forwardConfig), job.stage, now, now).Scan(&job.queueID) != nil {
+		return false
+	}
+	if tx.Commit() != nil {
+		return false
+	}
+	job.attempts = 1
+	return job.queueID > 0
+}
+
+func (a *App) updateForwardReservation(ctx context.Context, job forwardJob, status, reason string) {
+	_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,updated_at=?,completed_at=? WHERE history_id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), time.Now().UnixMilli(), time.Now().UnixMilli(), job.historyID)
+	a.notifyForwardQueue()
+}
+
+func mustJSON(value any) string { raw, _ := json.Marshal(value); return string(raw) }
+
+func (a *App) directForwardNow(ctx context.Context, job *forwardJob) error {
+	for i, route := range matchingForwardRoutes(job.settings, job.topicID) {
+		settings := job.destinations[i].Settings
+		destination := toString(settings["destinationGroupId"])
+		if destination == "" {
+			destination = toString(settings["destination"])
+		}
+		if job.directForward == nil {
+			return errors.New("native Telegram forwarding is unavailable")
+		}
+		job.destinations[i].Status, job.destinations[i].Method = "processing", "native_forward"
+		a.persistForwardProgress(ctx, *job)
+		if err := job.directForward(ctx, telegram.ForwardMessageRequest{Source: job.groupID, Destination: destination, MessageID: job.messageID, TopicID: int(number(route["destinationTopicId"], 0))}); err != nil {
+			return err
+		}
+		job.destinations[i].Status = "forwarded"
+		a.persistForwardProgress(ctx, *job)
+	}
+	return nil
 }
 
 func (a *App) runForwards(ctx context.Context) {
@@ -219,11 +335,11 @@ func (a *App) waitForwardStart(ctx context.Context, mu *sync.Mutex, next *time.T
 
 func (a *App) claimForward(ctx context.Context) (*forwardJob, error) {
 	var job forwardJob
-	var facts, forwardConfig string
+	var facts, forwardConfig, destinations string
 	err := a.db.Writer.QueryRowContext(ctx, `UPDATE tgdl_forward_queue SET status='processing',updated_at=? WHERE id=(
 		SELECT id FROM tgdl_forward_queue WHERE status='pending' AND COALESCE((SELECT paused FROM tgdl_queue_state WHERE id=1),0)=0 ORDER BY id LIMIT 1
-	) RETURNING id,history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json`, time.Now().UnixMilli()).Scan(
-		&job.queueID, &job.historyID, &job.groupID, &job.groupName, &job.messageID, &job.fileName, &job.topicID, &job.text, &job.recordID, &job.path, &facts, &forwardConfig)
+	) RETURNING id,history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,destinations_json,attempts`, time.Now().UnixMilli()).Scan(
+		&job.queueID, &job.historyID, &job.groupID, &job.groupName, &job.messageID, &job.fileName, &job.topicID, &job.text, &job.recordID, &job.path, &facts, &forwardConfig, &job.stage, &destinations, &job.attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -233,12 +349,16 @@ func (a *App) claimForward(ctx context.Context) (*forwardJob, error) {
 	if err = json.Unmarshal([]byte(facts), &job.facts); err != nil {
 		return nil, err
 	}
+	_ = json.Unmarshal([]byte(destinations), &job.destinations)
 	if forwardConfig != "" {
 		var snapshot forwardConfigSnapshot
 		if err = json.Unmarshal([]byte(forwardConfig), &snapshot); err != nil {
 			return nil, err
 		}
 		job.settings, job.accountID = snapshot.Settings, snapshot.AccountID
+		if len(snapshot.Destinations) > 0 && len(job.destinations) == 0 {
+			job.destinations = snapshot.Destinations
+		}
 	}
 	return &job, nil
 }
@@ -249,12 +369,132 @@ func (a *App) notifyForwardQueue() {
 	}
 }
 
+func (a *App) handleManualForwardEnqueue(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs         []int64  `json:"ids"`
+		Paths       []string `json:"paths"`
+		Destination string   `json:"destination"`
+		Caption     string   `json:"caption"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		return
+	}
+	if len(body.IDs) == 0 && len(body.Paths) > 0 {
+		for _, p := range body.Paths {
+			var id int64
+			if err := a.db.Reader.QueryRowContext(r.Context(), `SELECT id FROM downloads WHERE REPLACE(file_path,char(92),'/')=? AND status='completed' ORDER BY id DESC LIMIT 1`, strings.ReplaceAll(p, "\\", "/")).Scan(&id); err != nil {
+				writeJSONError(w, http.StatusNotFound, "selected media not found")
+				return
+			}
+			body.IDs = append(body.IDs, id)
+		}
+	}
+	if len(body.IDs) == 0 || len(body.IDs) > 100 {
+		writeJSONError(w, http.StatusBadRequest, "select 1 to 100 media items")
+		return
+	}
+	if strings.TrimSpace(body.Destination) == "" {
+		writeJSONError(w, http.StatusBadRequest, "destination is required")
+		return
+	}
+	type mediaRow struct {
+		id                                                 int64
+		groupID, groupName, messageID, name, path, caption string
+	}
+	rows := make([]mediaRow, 0, len(body.IDs))
+	seen := map[int64]bool{}
+	for _, id := range body.IDs {
+		if id <= 0 || seen[id] {
+			writeJSONError(w, http.StatusBadRequest, "media IDs must be positive and unique")
+			return
+		}
+		seen[id] = true
+		var row mediaRow
+		row.id = id
+		var recordID int64
+		err := a.db.Reader.QueryRowContext(r.Context(), `SELECT id,group_id,group_name,message_id,file_name,file_path FROM downloads WHERE id=? AND status='completed'`, id).Scan(&recordID, &row.groupID, &row.groupName, &row.messageID, &row.name, &row.path)
+		if err != nil {
+			writeJSONError(w, http.StatusNotFound, "download not found")
+			return
+		}
+		if row.path == "" {
+			writeJSONError(w, http.StatusConflict, "download has no local media file")
+			return
+		}
+		rows = append(rows, row)
+	}
+	for _, row := range rows {
+		mode := "source_info"
+		if body.Caption != "" {
+			mode = "override"
+		}
+		route := map[string]any{"destinationGroupId": strings.TrimSpace(body.Destination), "captionMode": mode, "caption": body.Caption}
+		settings := map[string]any{"enabled": true, "routes": []any{route}, "captionMode": mode, "caption": body.Caption}
+		var msgID int
+		_, _ = fmt.Sscan(row.messageID, &msgID)
+		var histID int64
+		_ = a.db.Writer.QueryRowContext(r.Context(), `SELECT id FROM tgdl_processing_attempts WHERE group_id=? AND message_id=? ORDER BY id DESC LIMIT 1`, row.groupID, msgID).Scan(&histID)
+		a.queueForward(forwardJob{groupID: row.groupID, groupName: row.groupName, messageID: msgID, fileName: row.name, recordID: row.id, path: row.path, historyID: histID, settings: settings, stage: "available"})
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"success": true, "queued": len(body.IDs)})
+}
+
+func (a *App) handleGlobalForwardProtection(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Protect bool `json:"protect"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		return
+	}
+	cfg, err := a.config.Load(r.Context())
+	if err != nil {
+		writeJSONError(w, 500, err.Error())
+		return
+	}
+	block, _ := cfg["forwarding"].(map[string]any)
+	if block == nil {
+		block = map[string]any{}
+	}
+	block["protect"] = body.Protect
+	cfg["forwarding"] = block
+	if err := a.config.Save(r.Context(), cfg); err != nil {
+		writeJSONError(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"success": true})
+}
+
+func (a *App) handleForwardQueueRetry(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid forward job id")
+		return
+	}
+	res, err := a.db.Writer.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status='pending',reason='',completed_at=0,updated_at=? WHERE id=? AND status IN ('failed','interrupted')`, time.Now().UnixMilli(), id)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		writeJSONError(w, http.StatusConflict, "forward job is not retryable")
+		return
+	}
+	a.notifyForwardQueue()
+	select {
+	case a.forwards <- struct{}{}:
+	default:
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
 func (a *App) finishForwardQueue(ctx context.Context, job forwardJob, status, reason string) {
 	if job.queueID == 0 {
 		return
 	}
 	now := time.Now().UnixMilli()
-	_, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=CASE WHEN ?='' THEN reason ELSE ? END,updated_at=?,completed_at=? WHERE id=?`, status, reason, reason, now, now, job.queueID)
+	destinations, _ := json.Marshal(job.destinations)
+	_, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=CASE WHEN ?='' THEN reason ELSE ? END,stage=?,destinations_json=?,attempts=?,updated_at=?,completed_at=? WHERE id=?`, status, reason, reason, job.stage, string(destinations), job.attempts, now, now, job.queueID)
 	if err != nil && a.output != nil {
 		fmt.Fprintf(a.output, "AutoForward: could not record queue status for %s: %v\n", job.fileName, err)
 	}
@@ -270,7 +510,7 @@ func (a *App) forwardQueueSnapshot(ctx context.Context) (map[string]any, error) 
 		FROM tgdl_forward_queue`).Scan(&stats.Total, &stats.Pending, &stats.Active, &stats.Forwarded, &stats.Failed, &stats.Interrupted, &stats.NotApplicable); err != nil {
 		return nil, err
 	}
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT group_id,group_name,message_id,file_name,topic_id,status,reason,created_at,forward_config_json FROM tgdl_forward_queue
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT id,group_id,group_name,message_id,file_name,topic_id,status,reason,created_at,forward_config_json,stage,destinations_json FROM tgdl_forward_queue
 		WHERE status IN ('pending','processing') OR id IN (SELECT id FROM tgdl_forward_queue WHERE status NOT IN ('pending','processing') ORDER BY id DESC LIMIT 50)
 		ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END,id DESC`)
 	if err != nil {
@@ -280,11 +520,12 @@ func (a *App) forwardQueueSnapshot(ctx context.Context) (map[string]any, error) 
 	items := make([]map[string]any, 0, 50)
 	cfg, _ := a.config.Load(ctx)
 	for rows.Next() {
-		var groupID, groupName, fileName, status, reason, forwardConfig string
+		var queueID int64
+		var groupID, groupName, fileName, status, reason, forwardConfig, stage, destinationsJSON string
 		var messageID int64
 		var topicID int
 		var createdAt int64
-		if err := rows.Scan(&groupID, &groupName, &messageID, &fileName, &topicID, &status, &reason, &createdAt, &forwardConfig); err != nil {
+		if err := rows.Scan(&queueID, &groupID, &groupName, &messageID, &fileName, &topicID, &status, &reason, &createdAt, &forwardConfig, &stage, &destinationsJSON); err != nil {
 			return nil, err
 		}
 		var destinations []string
@@ -304,7 +545,9 @@ func (a *App) forwardQueueSnapshot(ctx context.Context) (map[string]any, error) 
 				destinations = append(destinations, destination)
 			}
 		}
-		items = append(items, map[string]any{"groupId": groupID, "groupName": groupName, "messageId": messageID, "fileName": fileName, "topicId": topicID, "destinations": destinations, "status": status, "reason": reason, "createdAt": createdAt})
+		var destinationStates []forwardDestination
+		_ = json.Unmarshal([]byte(destinationsJSON), &destinationStates)
+		items = append(items, map[string]any{"id": queueID, "groupId": groupID, "groupName": groupName, "messageId": messageID, "fileName": fileName, "topicId": topicID, "destinations": destinations, "destinationStates": destinationStates, "stage": stage, "status": status, "reason": reason, "createdAt": createdAt})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -319,7 +562,14 @@ func forwardSettings(cfg map[string]any, groupID string) (settings map[string]an
 		if toString(group["id"]) != groupID {
 			continue
 		}
-		settings, _ = group["autoForward"].(map[string]any)
+		stored, _ := group["autoForward"].(map[string]any)
+		if stored == nil {
+			return nil, toString(group["forwardAccount"]), false
+		}
+		settings = cloneMap(stored)
+		if _, present := settings["directForward"]; !present {
+			settings["directForward"] = true
+		}
 		return settings, toString(group["forwardAccount"]), settings["enabled"] == true
 	}
 	return nil, "", false
@@ -471,6 +721,28 @@ func normalizedAutoForward(existing, value any) (map[string]any, error) {
 			return nil, fmt.Errorf("invalid caption regex: %w", err)
 		}
 	}
+	if _, ok := out["protect"]; ok {
+		if _, valid := out["protect"].(bool); !valid {
+			if toString(out["protect"]) != "on" && toString(out["protect"]) != "off" {
+				return nil, errors.New("autoForward protect must be on or off")
+			}
+		}
+	}
+	for i, value := range routes {
+		route, _ := value.(map[string]any)
+		if route == nil {
+			continue
+		}
+		mode := toString(route["captionMode"])
+		if mode == "inherit" {
+			mode = toString(out["captionMode"])
+		}
+		if mode == "" {
+			mode = "source_info"
+		}
+		route["captionMode"] = mode
+		routes[i] = route
+	}
 	out["captionMode"] = mode
 	if hasRoutes {
 		out["routes"] = routes
@@ -483,6 +755,7 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 	defer finishActivity()
 	status := "failed"
 	reason := ""
+	job.attempts++
 	defer func() {
 		if ctx.Err() != nil {
 			status = "interrupted"
@@ -490,11 +763,27 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 		}
 		a.finishForwardQueue(context.WithoutCancel(ctx), job, status, reason)
 		a.finishProcessingForward(context.WithoutCancel(ctx), job.historyID, status)
+		if status == "failed" && job.queueID > 0 && job.attempts < 3 && ctx.Err() == nil {
+			delay := time.Second * time.Duration(1<<max(0, job.attempts-1))
+			time.AfterFunc(delay, func() {
+				res, err := a.db.Writer.ExecContext(context.WithoutCancel(ctx), `UPDATE tgdl_forward_queue SET status='pending',reason='',updated_at=? WHERE id=? AND status='failed' AND attempts=?`, time.Now().UnixMilli(), job.queueID, job.attempts)
+				if err == nil {
+					if n, _ := res.RowsAffected(); n > 0 {
+						select {
+						case a.forwards <- struct{}{}:
+						default:
+						}
+						a.notifyForwardQueue()
+					}
+				}
+			})
+		}
 	}()
 	if job.historyID != 0 {
 		_, _ = a.db.Writer.ExecContext(context.WithoutCancel(ctx), `UPDATE tgdl_processing_attempts SET forward_status='processing',local_delete_status=CASE WHEN local_delete_status='pending' THEN 'pending' ELSE 'not_requested' END WHERE id=?`, job.historyID)
 		a.notifyProcessingHistory()
 	}
+	globalConfig, _ := a.config.Load(ctx)
 	groupSettings, accountID := job.settings, job.accountID
 	if groupSettings == nil {
 		cfg, err := a.config.Load(ctx)
@@ -518,14 +807,127 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 	if blocked, _, err := a.accessBlocked(ctx, job.groupID); err != nil || blocked {
 		return
 	}
+	if len(job.destinations) != len(routes) {
+		job.destinations = make([]forwardDestination, len(routes))
+	}
+	needsUpload := false
 	for i, route := range routes {
 		settings := inheritCaptionSettings(route, groupSettings)
-		deleteAfter := groupSettings["deleteAfterForward"] == true && i == len(routes)-1
-		if !a.forwardToRoute(ctx, job, accountID, settings, deleteAfter) {
-			return
+		settings = effectiveForwardProtection(settings, groupSettings, route, job.topicID, globalConfig)
+		if job.destinations[i].Settings == nil {
+			job.destinations[i] = forwardDestination{Settings: settings, Status: "pending"}
+		} else {
+			settings = job.destinations[i].Settings
+		}
+		job.destinations[i].Settings = settings
+		if settings["captionMode"] == "source_info" {
+			settings["captionMode"] = "native"
+			job.destinations[i].Settings = settings
+		}
+		if settings["protect"] == true || customCaption(settings) {
+			needsUpload = true
 		}
 	}
+	if job.path == "" && needsUpload {
+		a.forwardFailed(job, "", errors.New("protected forwarding requires a completed download"))
+		return
+	}
+	if needsUpload {
+		job.stage = "upload"
+	} else if job.path == "" {
+		job.stage = "native_forward"
+	} else {
+		job.stage = "upload"
+	}
+	a.persistForwardProgress(ctx, job)
+	for i, route := range routes {
+		settings := inheritCaptionSettings(route, groupSettings)
+		settings = effectiveForwardProtection(settings, groupSettings, route, job.topicID, globalConfig)
+		if job.destinations[i].Settings != nil {
+			settings = job.destinations[i].Settings
+		}
+		deleteAfter := job.recordID != 0 && groupSettings["deleteAfterForward"] == true && i == len(routes)-1
+		if job.destinations[i].Status == "forwarded" {
+			continue
+		}
+		job.destinations[i].Status = "processing"
+		if customCaption(settings) || settings["protect"] == true || job.path != "" {
+			job.destinations[i].Method = "upload"
+		} else {
+			job.destinations[i].Method = "native_forward"
+		}
+		a.persistForwardProgress(ctx, job)
+		if !a.forwardToRoute(ctx, job, accountID, settings, deleteAfter) {
+			job.destinations[i].Status = "failed"
+			job.destinations[i].Reason = "delivery failed"
+			return
+		}
+		job.destinations[i].Status, job.destinations[i].Reason = "forwarded", ""
+		a.persistForwardProgress(ctx, job)
+	}
+	job.stage = "complete"
 	status = "forwarded"
+}
+
+func (a *App) downloadForForward(ctx context.Context, job *forwardJob) error {
+	if job.messageID <= 0 || a.monitor == nil {
+		return errors.New("source message cannot be downloaded for protected forwarding")
+	}
+	return errors.New("source media needs a live Telegram session for download")
+}
+
+func customCaption(settings map[string]any) bool {
+	switch toString(settings["captionMode"]) {
+	case "native", "source_info":
+		return false
+	default:
+		return true
+	}
+}
+
+func effectiveForwardProtection(settings, group map[string]any, route map[string]any, topicID int, config ...map[string]any) map[string]any {
+	out := make(map[string]any, len(settings)+1)
+	for k, v := range settings {
+		out[k] = v
+	}
+	delete(out, "protect")
+	value := any(nil)
+	if len(config) > 0 {
+		block, _ := config[0]["forwarding"].(map[string]any)
+		value = block["protect"]
+	}
+	if v, ok := group["protect"]; ok {
+		value = v
+	}
+	out["protect"] = protectionValue(value) == 1
+	return out
+}
+
+func protectionValue(v any) int {
+	switch x := v.(type) {
+	case bool:
+		if x {
+			return 1
+		}
+		return 0
+	case string:
+		if strings.EqualFold(x, "on") {
+			return 1
+		}
+		if strings.EqualFold(x, "off") {
+			return 0
+		}
+	}
+	return -1
+}
+
+func (a *App) persistForwardProgress(ctx context.Context, job forwardJob) {
+	if job.queueID == 0 {
+		return
+	}
+	raw, _ := json.Marshal(job.destinations)
+	_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET stage=?,destinations_json=?,updated_at=? WHERE id=?`, job.stage, string(raw), time.Now().UnixMilli(), job.queueID)
+	a.notifyForwardQueue()
 }
 
 func (a *App) forwardToRoute(ctx context.Context, job forwardJob, accountID string, settings map[string]any, deleteAfter bool) bool {
@@ -547,6 +949,24 @@ func (a *App) forwardToRoute(ctx context.Context, job forwardJob, accountID stri
 		}
 		destWasBlocked = blocked
 	}
+	if !customCaption(settings) && settings["protect"] != true && job.messageID > 0 && a.forwarder != nil {
+		sender, ok := a.forwarder.(nativeForwardSender)
+		if !ok {
+			a.forwardFailed(job, destination, errors.New("native Telegram forwarding is unavailable"))
+			return false
+		}
+		used, _, err := sender.ForwardMessage(ctx, accountID, telegram.ForwardMessageRequest{Source: job.groupID, Destination: destination, MessageID: job.messageID, TopicID: int(number(settings["destinationTopicId"], 0)), Protect: false})
+		if err == nil {
+			_ = used
+			return true
+		}
+		// The source may disallow native forwarding while still allowing the
+		// application account to download and send an accessible media file.
+		if job.path == "" {
+			a.forwardFailed(job, destination, err)
+			return false
+		}
+	}
 	file, err := openMedia(a.downloadsDir, job.path)
 	if err != nil {
 		a.forwardFailed(job, destination, fmt.Errorf("open downloaded file: %w", err))
@@ -563,7 +983,7 @@ func (a *App) forwardToRoute(ctx context.Context, job forwardJob, accountID stri
 		a.forwardFailed(job, destination, err)
 		return false
 	}
-	req := telegram.SendFileRequest{Destination: destination, TopicID: int(number(settings["destinationTopicId"], 0)), Name: path.Base(job.path), Size: info.Size(), Facts: job.facts, Caption: caption, Entities: entities}
+	req := telegram.SendFileRequest{Destination: destination, TopicID: int(number(settings["destinationTopicId"], 0)), Name: path.Base(job.path), Size: info.Size(), Facts: job.facts, Caption: caption, Entities: entities, Protect: settings["protect"] == true}
 	var used string
 	var sent int
 	floodWaitAttempts := a.forwarderConfig(ctx).floodWaitAttempts
@@ -638,6 +1058,17 @@ func inheritCaptionSettings(route, group map[string]any) map[string]any {
 		if value, ok := group[key]; ok {
 			out[key] = value
 		}
+	}
+	if toString(out["captionMode"]) == "source_info" {
+		out["captionMode"] = "native"
+	}
+	return out
+}
+
+func cloneMap(source map[string]any) map[string]any {
+	out := make(map[string]any, len(source))
+	for key, value := range source {
+		out[key] = value
 	}
 	return out
 }

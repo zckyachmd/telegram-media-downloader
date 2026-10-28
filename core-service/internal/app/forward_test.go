@@ -49,6 +49,15 @@ func (f *fakeForwarder) SendFile(_ context.Context, account string, req telegram
 	}
 	return account, 41, f.err
 }
+func (f *fakeForwarder) ForwardMessage(_ context.Context, account string, req telegram.ForwardMessageRequest) (string, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if account == "" {
+		account = "default"
+	}
+	f.sent = append(f.sent, sentFile{account: account, req: telegram.SendFileRequest{Destination: req.Destination}})
+	return account, 42, f.err
+}
 
 func (f *fakeForwarder) calls() []sentFile {
 	f.mu.Lock()
@@ -96,6 +105,113 @@ func forwardTestApp(t *testing.T, autoForward map[string]any) (*App, *fakeForwar
 	fake.observing.Store(true)
 	a.forwarder = fake
 	return a, fake
+}
+
+func TestForwardProtectionInheritanceAndCaptionMethod(t *testing.T) {
+	cfg := map[string]any{"forwarding": map[string]any{"protect": true}}
+	group := map[string]any{"protect": true}
+	route := map[string]any{"captionMode": "native", "protect": false}
+	settings := effectiveForwardProtection(route, group, route, 7, cfg)
+	if settings["protect"] != true {
+		t.Fatalf("group override lost: %#v", settings)
+	}
+	if customCaption(settings) {
+		t.Fatal("source caption should permit native forwarding")
+	}
+	settings = effectiveForwardProtection(map[string]any{"protect": false}, group, route, 7, cfg)
+	if settings["protect"] != true {
+		t.Fatalf("legacy route override replaced group rule: %#v", settings)
+	}
+	if customCaption(map[string]any{"captionMode": "native"}) {
+		t.Fatal("native caption should permit direct forwarding")
+	}
+	if normalized, err := normalizedAutoForward(nil, map[string]any{"directForward": false}); err != nil || normalized["directForward"] != false {
+		t.Fatalf("direct forward opt-out was not preserved: %#v, %v", normalized, err)
+	}
+}
+
+func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "captionMode": "native"})
+	var directCalls atomic.Int32
+	transport := mediaTransport(func(context.Context, telegram.Attachment, io.Writer) error {
+		t.Fatal("direct forward downloaded media")
+		return nil
+	})
+	_, err := a.ingestTelegramWithForward(ctx, docMessage(10, 123, 77, "native caption"), "", "Source", "acct1", transport, func(_ context.Context, request telegram.ForwardMessageRequest) error {
+		if request.Destination != "@Archive" || request.MessageID != 10 {
+			t.Fatalf("forward request=%+v", request)
+		}
+		directCalls.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if directCalls.Load() != 1 || len(fake.calls()) != 0 {
+		t.Fatalf("direct=%d uploads=%d", directCalls.Load(), len(fake.calls()))
+	}
+	if _, exists := rowPath(t, a, "-1000000000123", 10); exists {
+		t.Fatal("direct-forwarded media was saved locally")
+	}
+
+	// With delete-after-forward off, the message must use the download/upload path.
+	a.configMu.Lock()
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		a.configMu.Unlock()
+		t.Fatal(err)
+	}
+	groups, _ := cfg["groups"].([]any)
+	group := groups[0].(map[string]any)
+	settings := group["autoForward"].(map[string]any)
+	settings["deleteAfterForward"] = false
+	group["autoForward"] = settings
+	cfg["groups"] = groups
+	err = a.config.Save(ctx, cfg)
+	a.configMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var downloads atomic.Int32
+	transport = mediaTransport(func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
+		downloads.Add(1)
+		_, writeErr := w.Write([]byte("media"))
+		return writeErr
+	})
+	_, err = a.ingestTelegramWithForward(ctx, docMessage(11, 123, 78, ""), "", "Source", "acct1", transport, func(context.Context, telegram.ForwardMessageRequest) error {
+		directCalls.Add(1)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "uploaded downloaded media", func() bool { return len(fake.calls()) == 1 })
+	if downloads.Load() != 1 || directCalls.Load() != 1 {
+		t.Fatalf("downloads=%d direct=%d", downloads.Load(), directCalls.Load())
+	}
+	if _, exists := rowPath(t, a, "-1000000000123", 11); !exists {
+		t.Fatal("downloaded media not retained when delete-after-forward is off")
+	}
+}
+
+func TestProtectedAutoForwardDownloadsAndUploadsProtectedCopy(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "protect": true, "captionMode": "native"})
+	if _, err := a.ingestTelegramWithForward(ctx, docMessage(20, 123, 88, ""), "", "Source", "acct1", fiveBytes, func(context.Context, telegram.ForwardMessageRequest) error {
+		t.Fatal("protected media used native forwarding")
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "protected upload", func() bool { return len(fake.calls()) == 1 })
+	call := fake.calls()[0]
+	if call.body != "media" || !call.req.Protect {
+		t.Fatalf("protected upload=%+v", call)
+	}
+	if _, exists := rowPath(t, a, "-1000000000123", 20); exists {
+		t.Fatal("protected copy should delete local media after successful forward")
+	}
 }
 
 func docMessage(id int, channel, doc int64, text string) *tg.Message {

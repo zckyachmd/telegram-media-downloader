@@ -3056,7 +3056,7 @@ function updateSelectionBar() {
     document
         .getElementById('selection-all')
         ?.classList.toggle('hidden', count > 0 && count >= loaded);
-    for (const id of ['selection-clear', 'selection-zip', 'selection-pin', 'selection-delete']) {
+    for (const id of ['selection-clear', 'selection-zip', 'selection-pin', 'selection-delete', 'selection-forward']) {
         const b = document.getElementById(id);
         if (b) b.disabled = count === 0;
     }
@@ -3253,6 +3253,7 @@ async function setupMediaSearch() {
     const selDel = document.getElementById('selection-delete');
     const selClear = document.getElementById('selection-clear');
     const selAll = document.getElementById('selection-all');
+    const selForward = document.getElementById('selection-forward');
 
     selectBtn?.addEventListener('click', () => {
         if (state.selectMode) {
@@ -3290,6 +3291,58 @@ async function setupMediaSearch() {
         // button so mobile/touch users get the same affordance.
         selectAllVisible();
         updateSelectionBar();
+    });
+
+    selForward?.addEventListener('click', async () => {
+        if (!state.selected?.size) return;
+        const form = document.createElement('form');
+        form.className = 'cd-fields';
+        form.innerHTML = `
+            <label class="cd-route-field"><span class="cd-label">${escapeHtml(i18nT('group.fwd.destination','Destination'))}</span>
+                <select name="destination" class="tg-input cd-input" required>
+                    <option value="">${escapeHtml(i18nT('group.fwd.select_destination','Choose destination…'))}</option>
+                    <option value="me">${escapeHtml(i18nT('group.fwd.saved_messages','Saved Messages'))}</option>
+                    <option value="storage">${escapeHtml(i18nT('group.fwd.storage','Telegram Downloader Storage'))}</option>
+                    ${(state.allDialogs || []).map((dialog) => `<option value="${escapeHtml(String(dialog.id))}">${escapeHtml(getGroupName(dialog.id, { fallback: dialog.name || dialog.title || String(dialog.id) }))}</option>`).join('')}
+                </select>
+            </label>
+            <details><summary class="cd-help cursor-pointer">${escapeHtml(i18nT('group.fwd.caption_override','Change caption (optional)'))}</summary>
+                <textarea name="caption" class="tg-input cd-input mt-2" rows="3" placeholder="${escapeHtml(i18nT('group.fwd.caption_override_help','Leave empty to keep Telegram’s native forwarded caption.'))}"></textarea>
+            </details>
+            <div class="flex justify-end gap-2 pt-2">
+                <button type="button" data-forward-cancel class="px-4 py-2 rounded-lg text-tg-textSecondary hover:bg-tg-hover text-sm">${escapeHtml(i18nT('common.cancel','Cancel'))}</button>
+                <button type="submit" class="px-4 py-2 rounded-lg bg-tg-blue text-white font-medium text-sm">${escapeHtml(i18nT('group.fwd.forward','Forward'))}</button>
+            </div>`;
+        const sheet = openSheet({ title: i18nT('group.fwd.title','Forward selected media'), content: form, size: 'sm' });
+        if (!state.allDialogs) {
+            api.get('/api/dialogs').then((response) => {
+                state.allDialogs = response.dialogs || [];
+                const select = form.querySelector('[name="destination"]');
+                const chosen = select.value;
+                select.insertAdjacentHTML('beforeend', state.allDialogs.map((dialog) => `<option value="${escapeHtml(String(dialog.id))}">${escapeHtml(getGroupName(dialog.id, { fallback: dialog.name || dialog.title || String(dialog.id) }))}</option>`).join(''));
+                select.value = chosen;
+            }).catch(() => {});
+        }
+        form.querySelector('[data-forward-cancel]')?.addEventListener('click', () => sheet.close());
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            const values = new FormData(form);
+            const destination = String(values.get('destination') || '').trim();
+            if (!destination) return;
+            const payload = { paths: Array.from(state.selected), destination };
+            const caption = String(values.get('caption') || '');
+            if (caption) payload.caption = caption;
+            const submit = form.querySelector('[type="submit"]');
+            submit.disabled = true;
+            try {
+                await api.post('/api/forward-queue', payload);
+                showToast(i18nT('group.fwd.queued','Selected media added to the forward queue'),'success');
+                state.selected.clear(); exitSelectMode(); updateSelectionBar(); sheet.close();
+            } catch(error) {
+                showToast(error?.data?.error||error?.message||'Forward queue failed','error');
+                submit.disabled = false;
+            }
+        });
     });
 
     selDel?.addEventListener('click', async () => {

@@ -10,6 +10,7 @@ import { wireJobButton } from './job-buttons.js';
 // loadSettings() open is harmless (sets innerHTML to identical markup)
 // but the listener flag prevents stacking duplicate change handlers.
 let _fontPickerWired = false;
+let _forwardingConfig = {};
 import { t as i18nT, tf as i18nTf } from './i18n.js';
 import { openSheet, confirmSheet, promptSheet } from './sheet.js';
 import { fileTokenQuery } from './media-url.js';
@@ -75,6 +76,7 @@ export async function loadSettings() {
         if (!isGuest) {
             config = await api.get('/api/config');
         }
+        _forwardingConfig = config.forwarding || {};
 
         // Defensive: ensure the font picker is populated every time the
         // user opens the Settings page. The boot-time wire in app.js
@@ -971,6 +973,7 @@ export function loadAdvanced(config) {
     set('setting-adv-forward-queue-size', f.queueSize);
     set('setting-adv-forward-interval-sec', f.intervalSec);
     set('setting-adv-forward-flood-attempts', f.floodWaitAttempts);
+    set('setting-forward-protect-default', cfg.forwarding?.protect === true);
 
     const h = { ...ADVANCED_DEFAULTS.history, ...(adv.history || {}) };
     set('setting-adv-backpressure', h.backpressureCap);
@@ -1616,6 +1619,7 @@ function _gatherSettingsPayload() {
             sweepIntervalMin: rescueSweep,
         },
         advanced: gatherAdvanced(),
+        forwarding: { ..._forwardingConfig, protect: document.getElementById('setting-forward-protect-default')?.checked === true },
         allowDmDownloads: dmActive,
     };
 }
@@ -1741,6 +1745,7 @@ export async function saveSettings() {
         // working config. Sending the full block keeps the on-disk shape
         // self-documenting (see DEFAULT_CONFIG.advanced in src/config/manager.js).
         advanced: gatherAdvanced(),
+        forwarding: { ..._forwardingConfig, protect: document.getElementById('setting-forward-protect-default')?.checked === true },
         allowDmDownloads: dmActive,
     };
 

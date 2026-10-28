@@ -47,6 +47,9 @@ func (f *fakeForwardAPI) MessagesSendMedia(_ context.Context, r *tg.MessagesSend
 	f.sent = append(f.sent, r)
 	return &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateMessageID{ID: 900 + len(f.sent), RandomID: r.RandomID}}}, nil
 }
+func (f *fakeForwardAPI) MessagesForwardMessages(context.Context, *tg.MessagesForwardMessagesRequest) (tg.UpdatesClass, error) {
+	return &tg.Updates{}, nil
+}
 func (f *fakeForwardAPI) ChannelsCreateChannel(_ context.Context, r *tg.ChannelsCreateChannelRequest) (tg.UpdatesClass, error) {
 	f.created++
 	if !r.Broadcast || r.Title != StorageChannelTitle {

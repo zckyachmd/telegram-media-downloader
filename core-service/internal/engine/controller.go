@@ -22,6 +22,9 @@ type Account interface {
 	Fingerprint() string
 	RefreshMessage(context.Context, *tg.Message) (*telegram.RefreshedMessage, error)
 }
+type NativeForwardAccount interface {
+	ForwardMessage(context.Context, telegram.ForwardMessageRequest) (int, error)
+}
 type historyRecoverable interface{ SupportsHistoryRecovery() bool }
 
 // historyRepairer repairs recovery markers while the account keeps running.
@@ -54,6 +57,12 @@ type Factory func(AccountConfig, *telegram.UpdateState, func(context.Context, tg
 type Target struct{ ID, Name string }
 type Filter func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error)
 type Sink func(context.Context, *Work, *tg.Message, telegram.MediaDownloader) error
+type ForwardSink func(context.Context, *Work, *tg.Message, telegram.MediaDownloader, func(context.Context, telegram.ForwardMessageRequest) error) error
+type ForwardSinkAdapter struct{ ForwardSink }
+
+func (s ForwardSinkAdapter) Invoke(ctx context.Context, work *Work, message *tg.Message, transport telegram.MediaDownloader, forward func(context.Context, telegram.ForwardMessageRequest) error) error {
+	return s.ForwardSink(ctx, work, message, transport, forward)
+}
 
 // UpdateObserver must persist its effects before returning. Any error prevents
 // acknowledgement of the Telegram update, just like durable queue ingestion.
@@ -67,7 +76,7 @@ type Controller struct {
 	dataDir        string
 	factory        Factory
 	filter         Filter
-	sink           Sink
+	sink           any
 	observer       UpdateObserver
 	notify         func(string, error)
 	opMu           sync.Mutex
@@ -128,7 +137,7 @@ type running struct {
 	progress        map[int64]*transferStats
 }
 
-func New(writer, reader *sql.DB, dataDir string, factory Factory, filter Filter, sink Sink, notify func(string, error)) *Controller {
+func New(writer, reader *sql.DB, dataDir string, factory Factory, filter Filter, sink any, notify func(string, error)) *Controller {
 	if factory == nil {
 		factory = func(cfg AccountConfig, state *telegram.UpdateState, handler func(context.Context, tg.UpdatesClass) error, gap func(int64)) (Account, error) {
 			return telegram.NewAccount(cfg.Telegram, state, handler, gap)
@@ -1004,7 +1013,23 @@ func (c *Controller) worker(run *running, index int) {
 			}
 		}
 		if err == nil {
-			err = c.sink(attemptCtx, work, message, trackedTransport{MediaDownloader: run.accounts[work.AccountID], stats: progress, total: &c.received, bandwidth: &c.bandwidth, budget: budget})
+			transport := trackedTransport{MediaDownloader: run.accounts[work.AccountID], stats: progress, total: &c.received, bandwidth: &c.bandwidth, budget: budget}
+			account := run.accounts[work.AccountID]
+			forward := func(ctx context.Context, req telegram.ForwardMessageRequest) error {
+				sender, ok := account.(NativeForwardAccount)
+				if !ok {
+					return errors.New("account cannot forward messages")
+				}
+				_, err := sender.ForwardMessage(ctx, req)
+				return err
+			}
+			if sink, ok := c.sink.(ForwardSinkAdapter); ok {
+				err = sink.Invoke(attemptCtx, work, message, transport, forward)
+			} else if sink, ok := c.sink.(Sink); ok {
+				err = sink(attemptCtx, work, message, transport)
+			} else {
+				err = errors.New("invalid monitor sink")
+			}
 		}
 		if err != nil && attemptCtx.Err() != nil {
 			err = context.Cause(attemptCtx)
