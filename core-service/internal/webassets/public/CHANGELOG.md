@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.18] — 2026-10-29
+
+### Fixed
+- Browser asset and service-worker versions now advance with this release, so cached dashboards fetch updated files.
+- Forum topics load before group settings render; their controls appear only when topics exist, and options stay hidden until the filter is enabled.
+- Native Telegram forwarding falls back to download and upload when rejected; protected copies use protected uploads, and local deletion follows the setting.
+
 ## [3.4.17] — 2026-10-26
 
 ### Fixed
