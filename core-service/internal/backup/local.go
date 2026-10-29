@@ -218,6 +218,25 @@ func (p *localProvider) List(ctx context.Context, prefix string) ([]Object, erro
 	})
 	return out, err
 }
+func (p *localProvider) Download(ctx context.Context, name string, dst io.Writer) error {
+	if err := validObject(name); err != nil {
+		return err
+	}
+	f, err := p.root.Open(name)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("backup source is not a regular file")
+	}
+	_, err = io.Copy(dst, contextReader{ctx, f})
+	return err
+}
 func (p *localProvider) Delete(ctx context.Context, name string) error {
 	if err := ctx.Err(); err != nil {
 		return err

@@ -89,6 +89,10 @@ func NewManager(ctx context.Context, opts Options) (*Manager, error) {
 		cancel()
 		return nil, err
 	}
+	if err := ensureBackupColumn(ctx, opts.Writer); err != nil {
+		cancel()
+		return nil, err
+	}
 	if _, err := opts.Writer.ExecContext(ctx, `UPDATE backup_jobs SET status='pending',started_at=NULL WHERE status='uploading'`); err != nil {
 		cancel()
 		return nil, err
@@ -117,6 +121,36 @@ func NewManager(ctx context.Context, opts Options) (*Manager, error) {
 		go m.cleanupTransfers()
 	}
 	return m, nil
+}
+
+func ensureBackupColumn(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(backup_jobs)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var def any
+		if err = rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		found = found || name == "full_snapshot"
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.ExecContext(ctx, `ALTER TABLE backup_jobs ADD COLUMN full_snapshot INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 func (m *Manager) Close() {
 	m.op.Lock()

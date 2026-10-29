@@ -15,6 +15,31 @@ import (
 	"github.com/gotd/td/tg"
 )
 
+func TestFullBackupStatusReportsIdleAfterAppStart(t *testing.T) {
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	admin, err := a.sessions.Create(context.Background(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := requestPurge(a, admin, "GET", "/api/backup/full/status", "")
+	if r.Code != 200 {
+		t.Fatalf("status code %d: %s", r.Code, r.Body.String())
+	}
+	var response struct {
+		Operation map[string]any `json:"operation"`
+	}
+	if err = json.Unmarshal(r.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Operation["stage"] != "idle" || response.Operation["running"] != false {
+		t.Fatalf("expected idle operation after app start, got %#v", response.Operation)
+	}
+}
+
 func TestBackupRecoveryParametersRequireAdministrator(t *testing.T) {
 	ctx := context.Background()
 	a, err := newConfiguredTestApp(ctx, Config{DataDir: t.TempDir()})

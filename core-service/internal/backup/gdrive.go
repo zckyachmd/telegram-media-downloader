@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"net/http"
 	"net/url"
@@ -638,4 +639,39 @@ func (p *gdriveProvider) List(ctx context.Context, prefix string) ([]Object, err
 		}
 	}
 	return out, nil
+}
+
+func (p *gdriveProvider) Download(ctx context.Context, name string, dst io.Writer) error {
+	ctx, done, err := p.life.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	if dst == nil || validObject(name) != nil {
+		return errors.New("invalid Google Drive download request")
+	}
+	dir, base := path.Split(name)
+	parent, err := p.folder(ctx, dir, false)
+	if err != nil || parent == "" {
+		if err == nil {
+			err = fs.ErrNotExist
+		}
+		return err
+	}
+	found, err := p.files(ctx, parent, base)
+	if err != nil {
+		return err
+	}
+	if len(found) == 0 {
+		return fs.ErrNotExist
+	}
+	file := found[0]
+	for _, candidate := range found[1:] {
+		if candidate.ModifiedTime.After(file.ModifiedTime) {
+			file = candidate
+		}
+	}
+	_, err = p.api.do(ctx, cloudRequest{op: "files.download", method: http.MethodGet,
+		url: p.ep.api + "/files/" + url.PathEscape(file.ID) + "?alt=media&supportsAllDrives=true", once: true, out: dst})
+	return err
 }

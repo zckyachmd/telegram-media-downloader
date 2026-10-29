@@ -9,6 +9,7 @@ import (
 )
 
 func registerBackupRoutes(mux *http.ServeMux, a *App) {
+	registerFullBackupRoutes(mux, a)
 	mux.Handle("GET /api/backup/destinations/{id}/recovery", a.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, ok := backupID(w, r)
 		if !ok {
@@ -81,6 +82,7 @@ func registerBackupRoutes(mux *http.ServeMux, a *App) {
 		mux.Handle(route, a.requireAdmin(http.HandlerFunc(a.handleBackupDestination)))
 	}
 }
+
 func backupQueryInt(r *http.Request, key string, def int) int {
 	v, e := strconv.Atoi(r.URL.Query().Get(key))
 	if e != nil || v == 0 {

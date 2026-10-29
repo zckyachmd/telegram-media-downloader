@@ -76,6 +76,10 @@ func (m *Manager) Retry(ctx context.Context, id int64) (bool, error) {
 	return err == nil, err
 }
 func (m *Manager) Run(ctx context.Context, id int64) error {
+	return m.runMode(ctx, id)
+}
+
+func (m *Manager) runMode(ctx context.Context, id int64) error {
 	m.op.Lock()
 	defer m.op.Unlock()
 	if err := m.available(); err != nil {
@@ -111,7 +115,7 @@ func (m *Manager) run(ctx context.Context, id int64) error {
 	} else {
 		// Reserve the archive job before building anything. A crash can restart the
 		// snapshot from its database job without an acknowledged run disappearing.
-		_, err = m.opts.Writer.ExecContext(ctx, `INSERT INTO backup_jobs(destination_id) SELECT ? WHERE NOT EXISTS(SELECT 1 FROM backup_jobs WHERE destination_id=? AND download_id IS NULL AND status IN ('pending','uploading'))`, id, id)
+		_, err = m.opts.Writer.ExecContext(ctx, `INSERT INTO backup_jobs(destination_id,full_snapshot) SELECT ?,0 WHERE NOT EXISTS(SELECT 1 FROM backup_jobs WHERE destination_id=? AND download_id IS NULL AND status IN ('pending','uploading'))`, id, id)
 		if err != nil {
 			return err
 		}
@@ -169,11 +173,12 @@ type job struct {
 	Remote        sql.NullString
 	Attempts, Max int
 	Version       int64
+	Full          bool
 }
 
 func (m *Manager) claim(ctx context.Context, id int64) (job, error) {
 	var j job
-	err := m.opts.Writer.QueryRowContext(ctx, `UPDATE backup_jobs SET status='uploading',started_at=?,attempts=attempts+1 WHERE id=(SELECT id FROM backup_jobs WHERE destination_id=? AND status='pending' AND (next_retry_at IS NULL OR next_retry_at<=?) ORDER BY id LIMIT 1) RETURNING id,download_id,snapshot_path,remote_path,attempts,max_attempts,COALESCE((SELECT version FROM native_backup_versions WHERE job_id=backup_jobs.id),0)`, time.Now().UnixMilli(), id, time.Now().UnixMilli()).Scan(&j.ID, &j.Download, &j.Snapshot, &j.Remote, &j.Attempts, &j.Max, &j.Version)
+	err := m.opts.Writer.QueryRowContext(ctx, `UPDATE backup_jobs SET status='uploading',started_at=?,attempts=attempts+1 WHERE id=(SELECT id FROM backup_jobs WHERE destination_id=? AND status='pending' AND (next_retry_at IS NULL OR next_retry_at<=?) ORDER BY id LIMIT 1) RETURNING id,download_id,snapshot_path,remote_path,attempts,max_attempts,COALESCE((SELECT version FROM native_backup_versions WHERE job_id=backup_jobs.id),0),full_snapshot`, time.Now().UnixMilli(), id, time.Now().UnixMilli()).Scan(&j.ID, &j.Download, &j.Snapshot, &j.Remote, &j.Attempts, &j.Max, &j.Version, &j.Full)
 	return j, err
 }
 func (m *Manager) work(ctx context.Context, id int64, w *worker) {
@@ -473,7 +478,7 @@ func (m *Manager) failed(ctx context.Context, d destination, j job, cause error,
 	}
 }
 
-var snapshotName = regexp.MustCompile(`^snapshot-\d{8}-\d{6}\.tar\.gz$`)
+var snapshotName = regexp.MustCompile(`^(snapshot|full)-\d{8}-\d{6}\.tar\.gz$`)
 
 func (m *Manager) retention(ctx context.Context, d destination, j job, p Provider) error {
 	if d.Mode == "snapshot" {

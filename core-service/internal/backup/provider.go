@@ -59,6 +59,7 @@ type UploadResult struct {
 type Provider interface {
 	Test(context.Context) (string, error)
 	Upload(context.Context, string, io.ReadSeeker, int64, func(int64)) (UploadResult, error)
+	Download(context.Context, string, io.Writer) error
 	List(context.Context, string) ([]Object, error)
 	Delete(context.Context, string) error
 	Close() error

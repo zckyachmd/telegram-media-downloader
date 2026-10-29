@@ -3713,11 +3713,84 @@
                 <div id="page-maintenance-backup" class="hidden max-w-5xl mx-auto px-3 sm:px-4" data-admin-only
                      data-page-title-key="maintenance.backup.page_title"
                      data-page-subtitle-key="maintenance.backup.subtitle">
+                    <section class="mb-3">
+                        <details id="backup-full-card" class="backup-full-card bg-tg-panel rounded-xl p-4 sm:p-5">
+                            <summary class="backup-action-summary">
+                                <span class="min-w-0 flex-1">
+                                    <span class="backup-action-title" data-i18n="maintenance.backup.full.title">Complete backup and restore</span>
+                                    <span class="backup-action-description" data-i18n="maintenance.backup.full.card_summary">Create an encrypted backup or restore a backup file.</span>
+                                </span>
+                                <i class="backup-action-chevron ri-arrow-down-s-line" aria-hidden="true"></i>
+                            </summary>
+                            <div class="backup-full-card-body">
+                                <p class="text-sm text-tg-textSecondary leading-relaxed" data-i18n="maintenance.backup.full.help">One encrypted archive includes the database and settings, Telegram accounts and sessions, monitored chats, queues and history, app logs, and downloaded media. Temporary partial files, older backup archives, and OS/container logs are excluded.</p>
+                                <p class="text-sm text-tg-textSecondary mt-2" data-i18n="maintenance.backup.full.limit">Packages are limited to 64 GiB; an oversized backup fails instead of being saved partially.</p>
+                                <div class="backup-action-grid mt-3">
+                                    <div class="backup-action-panel bg-tg-panel border border-tg-border/40">
+                                        <div class="backup-action-heading">
+                                            <span class="backup-step-number" aria-hidden="true">1</span>
+                                            <span class="min-w-0 flex-1">
+                                                <span class="backup-action-title" data-i18n="maintenance.backup.full.create_title">Create a backup</span>
+                                                <span class="backup-action-description" data-i18n="maintenance.backup.full.create_help">Choose a password. The encrypted file downloads when backup is complete.</span>
+                                            </span>
+                                        </div>
+                                        <div class="backup-action-body">
+                                            <label class="backup-field-label" for="backup-full-backup-password" data-i18n="maintenance.backup.full.backup_password">Backup password</label>
+                                            <div class="backup-password-row">
+                                                <input id="backup-full-backup-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" class="tg-input min-w-0 flex-1" data-i18n-placeholder="maintenance.backup.full.password_placeholder" placeholder="At least 12 characters">
+                                                <button type="button" class="backup-password-toggle tg-btn-secondary" data-target="backup-full-backup-password" data-i18n-aria-label="maintenance.backup.full.show_password" aria-label="Show password"><i class="ri-eye-line" aria-hidden="true"></i></button>
+                                            </div>
+                                            <p class="backup-field-help" data-i18n="maintenance.backup.full.password_rule">Use at least 12 characters. Keep this password to restore the file later.</p>
+                                            <button id="backup-full-run" disabled class="tg-btn backup-action-button" data-i18n="maintenance.backup.full.run_download">Create and download backup</button>
+                                        </div>
+                                    </div>
+                                    <div class="backup-action-panel bg-tg-panel border border-tg-border/40">
+                                        <div class="backup-action-heading">
+                                            <span class="backup-step-number" aria-hidden="true">2</span>
+                                            <span class="min-w-0 flex-1">
+                                                <span class="backup-action-title" data-i18n="maintenance.backup.full.restore_title_short">Restore a backup</span>
+                                                <span class="backup-action-description" data-i18n="maintenance.backup.full.restore_help">Select a .tgdf file and enter the password used to create it.</span>
+                                            </span>
+                                        </div>
+                                        <div class="backup-action-body">
+                                            <div class="backup-restore-fields">
+                                                <div class="backup-field-group">
+                                                    <label class="backup-field-label" for="backup-full-file" data-i18n="maintenance.backup.full.restore_file">Backup file to restore</label>
+                                                    <input id="backup-full-file" type="file" accept=".tgdf,application/octet-stream" class="backup-file-input">
+                                                    <p id="backup-full-file-name" class="backup-file-name" aria-live="polite" data-i18n="maintenance.backup.full.no_file">No file selected</p>
+                                                </div>
+                                                <div class="backup-field-group">
+                                                    <label class="backup-field-label" for="backup-full-restore-password" data-i18n="maintenance.backup.full.restore_password">Backup password</label>
+                                                    <div class="backup-password-row">
+                                                        <input id="backup-full-restore-password" type="password" autocomplete="current-password" maxlength="1024" class="tg-input min-w-0 flex-1" data-i18n-placeholder="maintenance.backup.full.restore_password_placeholder" placeholder="Enter the password for this file">
+                                                        <button type="button" class="backup-password-toggle tg-btn-secondary" data-target="backup-full-restore-password" data-i18n-aria-label="maintenance.backup.full.show_password" aria-label="Show password"><i class="ri-eye-line" aria-hidden="true"></i></button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <button id="backup-full-restore" disabled class="tg-btn-secondary backup-action-button" data-i18n="maintenance.backup.full.restore_upload">Upload and restore</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </details>
+                        <p id="backup-full-status" class="backup-operation-status mt-3" role="status" aria-live="polite"></p>
+                        <dialog id="backup-restore-wait" class="backup-restore-wait" aria-labelledby="backup-restore-wait-title" aria-describedby="backup-restore-wait-message">
+                            <div class="backup-restore-wait-card">
+                                <div id="backup-restore-wait-icon" class="backup-restore-wait-icon" aria-hidden="true"><i class="ri-loader-4-line"></i></div>
+                                <h2 id="backup-restore-wait-title" class="text-base font-semibold text-tg-text" data-i18n="maintenance.backup.full.wait_title">Restoring backup</h2>
+                                <p id="backup-restore-wait-message" class="text-sm text-tg-textSecondary mt-2" role="status" aria-live="polite" data-i18n="maintenance.backup.full.wait_uploading">Uploading backup file…</p>
+                                <div id="backup-restore-wait-progress" class="backup-restore-wait-progress is-indeterminate mt-4" role="progressbar" aria-label="Restore progress" aria-valuemin="0" aria-valuemax="100">
+                                    <div id="backup-restore-wait-progress-fill" class="backup-restore-wait-progress-fill"></div>
+                                </div>
+                                <p class="text-xs text-tg-textSecondary mt-3" data-i18n="maintenance.backup.full.wait_hint">Keep this page open. The app will restart when restore is ready.</p>
+                            </div>
+                        </dialog>
+                    </section>
                     <section class="bg-tg-panel rounded-xl p-4 mb-3">
                         <div class="flex items-start justify-between gap-3 flex-wrap">
                             <div class="min-w-0">
-                                <h2 class="text-tg-text text-base font-semibold" data-i18n="maintenance.backup.page_title">Backup destinations</h2>
-                                <p class="text-xs text-tg-textSecondary mt-0.5" data-i18n="maintenance.backup.subtitle">Mirror new downloads to S3-compatible storage, an SFTP NAS, or a local mount. Optional client-side encryption + scheduled snapshots.</p>
+                                <h2 class="text-tg-text text-base font-semibold" data-i18n="maintenance.backup.destinations.title">Other backup jobs</h2>
+                                <p class="text-xs text-tg-textSecondary mt-0.5" data-i18n="maintenance.backup.destinations.help">Media mirrors and state-only snapshots are separate jobs. Full restore above does not use them.</p>
                             </div>
                             <div class="flex items-center gap-2 min-w-0 flex-wrap justify-end">
                                 <button id="backup-add-btn" class="tg-btn text-xs px-3 py-1.5 inline-flex items-center gap-1.5">
@@ -3759,7 +3832,7 @@
                     <section class="bg-tg-panel rounded-xl p-4">
                         <h3 class="text-tg-text text-sm font-semibold mb-2 flex items-center gap-2">
                             <i class="ri-history-line text-tg-textSecondary"></i>
-                            <span data-i18n="maintenance.backup.recent">Recent activity</span>
+                            <span data-i18n="maintenance.backup.destinations.recent">Other backup jobs</span>
                         </h3>
                         <div id="backup-recent" class="space-y-1 max-h-[40vh] overflow-y-auto pr-1"></div>
                         <div id="backup-recent-empty" class="hidden text-center py-8 text-sm text-tg-textSecondary" data-i18n="maintenance.backup.recent_empty">No backup jobs yet.</div>

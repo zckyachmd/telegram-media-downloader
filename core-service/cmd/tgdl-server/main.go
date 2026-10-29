@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/app"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/backup"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/config"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/version"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/webassets"
@@ -51,6 +54,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
+	downloadsDir := cfg.DownloadsDir
+	if downloadsDir == "" {
+		downloadsDir = filepath.Join(cfg.DataDir, "downloads")
+	}
+	if _, err = backup.ActivatePendingFullRestore(cfg.DataDir, downloadsDir); err != nil {
+		_, _ = fmt.Fprintln(stderr, "recover pending full restore:", err)
+		return 1
+	}
 	devMode := os.Getenv("TGDL_DEV_MODE") == "1"
 	var static fs.FS
 	if devMode {
@@ -69,18 +80,38 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: devMode})
+	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, Restart: stop, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: devMode})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
 	}
-	defer a.Close()
 	address := net.JoinHostPort(cfg.BindHost, strconv.Itoa(cfg.Port))
 	log.Printf("tgdl-server listening on %s", address)
 	server := &http.Server{Addr: address, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20}
-	if err := serve(ctx, server); err != nil {
+	serveErr := serve(ctx, server)
+	closeErr := a.Close()
+	if err = errors.Join(serveErr, closeErr); err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
+	}
+	activated, err := backup.ActivatePendingFullRestore(cfg.DataDir, downloadsDir)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "activate full restore:", err)
+		return 1
+	}
+	if activated {
+		executable, err := os.Executable()
+		if err != nil {
+			_, _ = fmt.Fprintln(stderr, "restart after full restore:", err)
+			return 1
+		}
+		child := exec.Command(executable, args...)
+		child.Stdin, child.Stdout, child.Stderr = os.Stdin, stdout, stderr
+		if err = child.Start(); err != nil {
+			_, _ = fmt.Fprintln(stderr, "restart after full restore:", err)
+			return 1
+		}
+		_ = child.Process.Release()
 	}
 	return 0
 }

@@ -15,3 +15,9 @@
 - **Effective protection**: The resolved protection setting after global, group, topic, and route overrides are applied when a job is queued.
 - **Destination outcome**: The durable delivery status for one destination within a forward job; retrying a job skips destinations already sent successfully.
 - **Dev asset serving**: In local development, serve frontend files from the working tree so edits appear after a browser refresh without rebuilding the Go binary.
+- **Full backup**: One recoverable package containing application state, Telegram account sessions, downloaded media, and persistent application logs.
+- **Recovery key**: The secret needed to decrypt a full backup after the application server or its local data has been lost.
+- **Agent identity**: A distinct identity for an AI agent connecting to operate an application instance.
+- **Operation permission**: Authorization for an agent identity to perform a defined kind of operation, optionally limited to specific chats or groups.
+- **Approval**: A human authorization bound to a specific requested operation and its target before that operation can execute.
+- **Agent audit event**: A record of an agent identity's requested operation, target, summarized change, outcome, and any approval or denial, excluding unnecessary secrets and sensitive content.

@@ -144,7 +144,7 @@ function _renderCard(dest) {
             ${progressBar}
             ${errBlock}
             <div class="flex items-center justify-end gap-1 mt-2 flex-wrap">
-                <button data-act="run" class="tg-btn text-xs px-2 py-1"><i class="ri-play-circle-line mr-0.5"></i><span data-i18n="maintenance.backup.run_now">Run now</span></button>
+                <button data-act="run" class="tg-btn text-xs px-2 py-1"><i class="ri-play-circle-line mr-0.5"></i><span>${escapeHtml(dest.mode === 'mirror' ? i18nT('maintenance.backup.run_mirror', 'Sync media now') : i18nT('maintenance.backup.run_snapshot', 'Create state snapshot'))}</span></button>
                 ${pauseBtn}
                 <button data-act="test" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-plug-line mr-0.5"></i><span data-i18n="maintenance.backup.test">Test</span></button>
                 <button data-act="edit" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-pencil-line mr-0.5"></i><span data-i18n="common.edit">Edit</span></button>
@@ -179,6 +179,10 @@ function _renderRecentRow(j) {
             label = j.status;
     }
     const target = j.remote_path || j.snapshot_path || `download #${j.download_id}`;
+    const isFullBackup = j.full_snapshot === true || Number(j.full_snapshot) === 1;
+    const type = isFullBackup
+        ? `<span class="rounded bg-tg-blue/15 text-tg-blue px-1.5 py-0.5 text-[10px]">${escapeHtml(i18nT('maintenance.backup.job.full', 'Full backup'))}</span>`
+        : '';
     const retryBtn =
         j.status === 'failed'
             ? `<button data-job-id="${j.id}" data-act="retry-job" class="text-[11px] px-2 py-0.5 rounded bg-tg-blue/15 text-tg-blue hover:bg-tg-blue/25"><i class="ri-refresh-line mr-0.5"></i>${escapeHtml(i18nT('maintenance.backup.retry', 'Retry'))}</button>`
@@ -192,6 +196,7 @@ function _renderRecentRow(j) {
             <i class="${icon} ${cls}"></i>
             <span class="text-tg-textSecondary tabular-nums w-12 shrink-0">${escapeHtml(ts)}</span>
             <span class="text-tg-text font-medium w-20 shrink-0">${escapeHtml(label)}</span>
+            ${type}
             <span class="text-tg-textSecondary truncate flex-1" title="${escapeHtml(target)}">${escapeHtml(j.destination_name || '#' + j.destination_id)} · ${escapeHtml(target)}</span>
             ${errSpan}
             ${retryBtn}
@@ -261,8 +266,32 @@ async function _refreshDestinations() {
         const r = await api.get('/api/backup/destinations');
         _destinations = Array.isArray(r.destinations) ? r.destinations : [];
         await _refreshStatuses();
+        await _refreshFullConfig();
     } catch (e) {
         showToast(e?.data?.error || e.message || 'Failed', 'error');
+    }
+}
+
+async function _refreshFullConfig() {
+    const status = $('backup-full-status');
+    try {
+        const state = await api.get('/api/backup/full/status');
+        const operation = state.operation || { running: false, stage: 'idle' };
+        const latest = state.latest;
+        const readyStatus = operation.running
+            ? `${i18nT(operation.type === 'restore' ? 'maintenance.backup.full.restoring' : 'maintenance.backup.full.creating', operation.type === 'restore' ? 'Restore in progress' : 'Full backup in progress')}: ${operation.stage}`
+            : operation.stage === 'error'
+                ? operation.error || i18nT('maintenance.backup.full.failed', 'Full backup operation failed.')
+                : latest
+                        ? `${i18nT('maintenance.backup.full.ready', 'Ready for full backup.') } ${i18nT('maintenance.backup.full.latest', 'Latest full backup')}: ${formatBytes(latest.size)} · ${formatRelativeTime(latest.modifiedAt)}.`
+                        : i18nT('maintenance.backup.full.ready', 'Ready for full backup.');
+        if (status) status.textContent = readyStatus;
+        const run = $('backup-full-run');
+        if (run) run.disabled = operation.running;
+        const restore = $('backup-full-restore');
+        if (restore) restore.disabled = operation.running;
+    } catch (e) {
+        if (status) status.textContent = e?.data?.error || e.message || 'Could not load full backup settings.';
     }
 }
 
@@ -820,6 +849,75 @@ function _wirePage() {
     _pageWired = true;
 
     $('backup-add-btn')?.addEventListener('click', () => _openWizard(null));
+    document.querySelectorAll('.backup-password-toggle').forEach((toggle) => {
+        toggle.addEventListener('click', () => {
+            const input = $(toggle.dataset.target);
+            if (!input) return;
+            const showing = input.type === 'password';
+            input.type = showing ? 'text' : 'password';
+            toggle.setAttribute('aria-pressed', String(showing));
+            toggle.setAttribute('aria-label', i18nT(
+                showing ? 'maintenance.backup.full.hide_password' : 'maintenance.backup.full.show_password',
+                showing ? 'Hide password' : 'Show password',
+            ));
+            toggle.innerHTML = `<i class="${showing ? 'ri-eye-off-line' : 'ri-eye-line'}" aria-hidden="true"></i>`;
+        });
+    });
+    $('backup-full-file')?.addEventListener('change', (event) => {
+        const file = event.target.files?.[0];
+        const label = $('backup-full-file-name');
+        if (!label) return;
+        label.textContent = file
+            ? `${file.name} · ${formatBytes(file.size)}`
+            : i18nT('maintenance.backup.full.no_file', 'No file selected');
+    });
+    $('backup-full-run')?.addEventListener('click', async () => {
+        const button = $('backup-full-run');
+        if (button?.disabled) return;
+        const password = $('backup-full-backup-password')?.value || '';
+        if (password.length < 12) {
+            showToast(i18nT('maintenance.backup.full.password_short', 'Use a password with at least 12 characters.'), 'error');
+            return;
+        }
+        button.disabled = true;
+        try {
+            await api.post('/api/backup/full/run', { password });
+            showToast(i18nT('maintenance.backup.full.started', 'Full backup started'), 'success');
+            _watchFullBackup(true);
+        } catch (e) {
+            showToast(e?.data?.error || e.message || 'Failed', 'error');
+        } finally {
+            await _refreshFullConfig();
+        }
+    });
+    $('backup-full-restore')?.addEventListener('click', async () => {
+        const button = $('backup-full-restore');
+        if (button?.disabled) return;
+        const file = $('backup-full-file')?.files?.[0];
+        const password = $('backup-full-restore-password')?.value || '';
+        if (!file) { showToast(i18nT('maintenance.backup.full.select_file', 'Choose a backup file to restore.'), 'error'); return; }
+        if (!password) { showToast(i18nT('maintenance.backup.full.password_required', 'Enter the password used when this backup was created.'), 'error'); return; }
+        const ok = await confirmSheet({
+            title: i18nT('maintenance.backup.full.restore_title', 'Restore this full backup?'),
+            body: i18nT('maintenance.backup.full.restore_warning', 'This replaces the current database, Telegram sessions, settings, logs, and media. A full rollback backup will be created first. The server will restart when staging finishes.'),
+            confirmLabel: i18nT('maintenance.backup.full.restore_upload', 'Upload and restore'),
+            danger: true,
+        });
+        if (!ok) return;
+        button.disabled = true;
+        _showRestoreWait('uploading', 0);
+        try {
+            const body = new FormData();
+            body.append('backup', file, file.name);
+            body.append('password', password);
+            await uploadFullRestore(body);
+            _watchFullRestore();
+        } catch (e) {
+            _closeRestoreWait();
+            showToast(e?.data?.error || e.message || 'Restore failed', 'error');
+            await _refreshFullConfig();
+        }
+    });
 
     // Event delegation — card buttons + retry-job buttons in the recent strip.
     $('backup-cards')?.addEventListener('click', (e) => {
@@ -844,9 +942,202 @@ function _wirePage() {
     });
 }
 
+function uploadFullRestore(body) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        const status = $('backup-full-status');
+        xhr.open('POST', '/api/backup/full/restore-upload');
+        xhr.setRequestHeader('Accept', 'application/json');
+        xhr.upload.addEventListener('progress', (event) => {
+            if (event.lengthComputable) {
+                const percent = Math.round((event.loaded / event.total) * 100);
+                _updateRestoreWait('uploading', percent);
+                if (status) status.textContent = `${i18nT('maintenance.backup.full.uploading', 'Uploading backup')}: ${percent}%`;
+            }
+        });
+        xhr.upload.addEventListener('load', () => {
+            _updateRestoreWait('verifying');
+            if (status) status.textContent = i18nT('maintenance.backup.full.verifying', 'Upload complete. Verifying backup…');
+        });
+        xhr.addEventListener('load', () => {
+            let result = {};
+            try { result = JSON.parse(xhr.responseText || '{}'); } catch { /* handled below */ }
+            if (xhr.status >= 200 && xhr.status < 300) resolve(result);
+            else reject(Object.assign(new Error(result.error || `HTTP ${xhr.status}`), { data: result }));
+        });
+        xhr.addEventListener('error', () => reject(new Error(i18nT('maintenance.backup.full.upload_failed', 'Backup upload failed. Check your connection and try again.'))));
+        xhr.addEventListener('abort', () => reject(new Error(i18nT('maintenance.backup.full.upload_failed', 'Backup upload failed. Check your connection and try again.'))));
+        xhr.send(body);
+    });
+}
+
+const RESTORE_WAIT_STAGES = {
+    uploading: ['wait_title', 'wait_uploading'],
+    verifying: ['wait_title', 'wait_verifying'],
+    creating_rollback: ['wait_title', 'wait_rollback'],
+    validating: ['wait_title', 'wait_validating'],
+    preparing_files: ['wait_title', 'wait_preparing'],
+    restarting: ['wait_title', 'wait_restarting'],
+    connection: ['wait_title', 'wait_connection'],
+    success: ['wait_success_title', 'wait_success'],
+};
+
+function _showRestoreWait(stage, percent = null) {
+    const dialog = $('backup-restore-wait');
+    if (!dialog) return;
+    if (!dialog.open) dialog.showModal();
+    _updateRestoreWait(stage, percent);
+}
+
+function _updateRestoreWait(stage, percent = null) {
+    const dialog = $('backup-restore-wait');
+    const [titleKey, messageKey] = RESTORE_WAIT_STAGES[stage] || RESTORE_WAIT_STAGES.verifying;
+    const title = $('backup-restore-wait-title');
+    const message = $('backup-restore-wait-message');
+    const progress = $('backup-restore-wait-progress');
+    const fill = $('backup-restore-wait-progress-fill');
+    const icon = $('backup-restore-wait-icon');
+    if (title) title.textContent = i18nT(`maintenance.backup.full.${titleKey}`, stage === 'success' ? 'Backup restored' : 'Restoring backup');
+    if (message) message.textContent = i18nT(`maintenance.backup.full.${messageKey}`, stage === 'success' ? 'Restore completed successfully.' : 'Restore is in progress…');
+    if (progress && fill) {
+        const determinate = Number.isFinite(percent);
+        progress.classList.toggle('is-indeterminate', !determinate && stage !== 'success');
+        progress.setAttribute('aria-valuenow', String(stage === 'success' ? 100 : (determinate ? percent : 0)));
+        progress.setAttribute('aria-valuetext', determinate || stage === 'success' ? `${stage === 'success' ? 100 : percent}%` : message?.textContent || 'In progress');
+        fill.style.width = `${stage === 'success' ? 100 : (determinate ? percent : 35)}%`;
+    }
+    if (dialog) dialog.classList.toggle('is-success', stage === 'success');
+    if (icon) icon.innerHTML = stage === 'success' ? '<i class="ri-checkbox-circle-line"></i>' : '<i class="ri-loader-4-line"></i>';
+}
+
+function _closeRestoreWait() {
+    const dialog = $('backup-restore-wait');
+    if (dialog?.open) dialog.close();
+}
+
+function _watchFullRestore() {
+    const status = $('backup-full-status');
+    let elapsed = 0;
+    const poll = async () => {
+        try {
+            const result = await api.get('/api/backup/full/status');
+            const state = result.operation || result;
+            if (state.stage === 'error') {
+                if (status) status.textContent = state.error || 'Restore failed.';
+                _closeRestoreWait();
+                showToast(state.error || i18nT('maintenance.backup.full.restore_failed', 'Restore failed.'), 'error');
+                await _refreshFullConfig();
+                return;
+            }
+            // The server may restart before this first status poll. A newly
+            // started app has no in-memory operation state, so its response is
+            // idle (or an empty object on older builds) instead of restarting.
+            if (!state.running && (!state.stage || state.stage === 'idle')) {
+                await _finishFullRestoreWait();
+                return;
+            }
+            const stage = RESTORE_WAIT_STAGES[state.stage] ? state.stage : 'verifying';
+            _updateRestoreWait(stage);
+            if (status) status.textContent = `${i18nT('maintenance.backup.full.restoring', 'Restore in progress')}: ${state.stage}`;
+            if (state.stage === 'restarting') {
+                await waitForRestoredServer();
+                return;
+            }
+        } catch {
+            _updateRestoreWait('connection');
+        }
+        elapsed += 2;
+        if (elapsed >= 600) {
+            _closeRestoreWait();
+            if (status) status.textContent = i18nT('maintenance.backup.full.wait_timeout', 'Restore status timed out. Check the server before retrying.');
+            showToast(i18nT('maintenance.backup.full.wait_timeout', 'Restore status timed out. Check the server before retrying.'), 'error');
+            return;
+        }
+        setTimeout(poll, 2000);
+    };
+    poll();
+}
+
+function _watchFullBackup(downloadWhenDone = false) {
+    const status = $('backup-full-status');
+    const poll = async () => {
+        try {
+            const result = await api.get('/api/backup/full/status');
+            const operation = result.operation || {};
+            if (operation.type !== 'backup' || !operation.running) {
+                await _refreshFullConfig();
+                if (operation.type === 'backup' && operation.stage === 'done' && downloadWhenDone) {
+                    window.location.assign('/api/backup/full/download');
+                }
+                return;
+            }
+            if (status) status.textContent = `${i18nT('maintenance.backup.full.creating', 'Full backup in progress')}: ${operation.stage}`;
+        } catch (e) {
+            if (status) status.textContent = e?.data?.error || e.message || 'Backup status unavailable.';
+            return;
+        }
+        setTimeout(poll, 2000);
+    };
+    poll();
+}
+
+async function waitForRestoredServer() {
+    let sawOffline = false;
+    for (let attempt = 0; attempt < 240; attempt++) {
+        let healthOk = false;
+        try {
+            const res = await fetch('/health', { cache: 'no-store' });
+            healthOk = res.ok;
+            if (!healthOk) sawOffline = true;
+        } catch { sawOffline = true; }
+        if (healthOk && sawOffline) {
+            return _finishFullRestoreWait();
+        }
+        if (healthOk) {
+            try {
+                // A fast restart can happen between health checks. The old app
+                // keeps reporting "restarting"; a fresh app reports "idle"
+                // (older servers may return an empty operation object).
+                const result = await api.get('/api/backup/full/status');
+                const operation = result.operation || result;
+                if (!operation.running && (!operation.stage || operation.stage === 'idle')) {
+                    return _finishFullRestoreWait();
+                }
+            } catch { /* status API can briefly lag behind health */ }
+        }
+        _updateRestoreWait(sawOffline ? 'restarting' : 'connection');
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+    _closeRestoreWait();
+    const message = i18nT('maintenance.backup.full.wait_timeout', 'Restore status timed out. Check the server before retrying.');
+    const status = $('backup-full-status');
+    if (status) status.textContent = message;
+    showToast(message, 'error');
+    return false;
+}
+
+async function _finishFullRestoreWait() {
+    _updateRestoreWait('success');
+    sessionStorage.setItem('tgdl-full-restore-success', '1');
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    _closeRestoreWait();
+    window.location.reload();
+    return true;
+}
+
 export async function init() {
     _wireWs();
     _wirePage();
+    const restoredSuccessfully = sessionStorage.getItem('tgdl-full-restore-success') === '1';
+    if (restoredSuccessfully) {
+        sessionStorage.removeItem('tgdl-full-restore-success');
+    }
     await _refreshDestinations();
     await _refreshRecent();
+    if (restoredSuccessfully) {
+        const message = i18nT('maintenance.backup.full.wait_success', 'Restore completed successfully.');
+        const status = $('backup-full-status');
+        if (status) status.textContent = message;
+        showToast(message, 'success');
+    }
 }

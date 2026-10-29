@@ -161,6 +161,7 @@ type cloudRequest struct {
 	header http.Header
 	// body is rebuilt for every attempt; nil sends no body.
 	body func() (io.Reader, int64)
+	out  io.Writer
 	// progress/part route upload-body reads through the shared pacer.
 	progress *transferProgress
 	part     int64
@@ -326,6 +327,12 @@ func (c *cloudAPI) once(ctx context.Context, r cloudRequest, stale string, used 
 		return cloudResponse{}, fmt.Errorf("%s %s: transport error", c.service, r.op)
 	}
 	defer resp.Body.Close()
+	if r.out != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if _, err = io.Copy(r.out, contextReader{ctx, resp.Body}); err != nil {
+			return cloudResponse{}, fmt.Errorf("%s %s: transport error reading response", c.service, r.op)
+		}
+		return cloudResponse{status: resp.StatusCode, header: resp.Header}, nil
+	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, cloudResponseLimit+1))
 	if err != nil {
 		if ctx.Err() != nil {

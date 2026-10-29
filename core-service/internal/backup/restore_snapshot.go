@@ -24,6 +24,7 @@ type RestoreOptions struct {
 	Passphrase string
 	Salt       []byte
 	Plaintext  bool
+	Full       bool
 	MaxBytes   int64
 	MaxFiles   int
 }
@@ -195,12 +196,15 @@ func extractSnapshot(ctx context.Context, src io.Reader, root *os.Root, opts Res
 		if e = validObject(name); e != nil {
 			return result, e
 		}
-		allowed := name == "db.sqlite" || name == "config.json" || name == "secret.key" || name == "sessions" || strings.HasPrefix(name, "sessions/")
+		allowed := name == "db.sqlite" || name == "config.json" || name == "secret.key" || name == "session.enc" || name == "sessions" || strings.HasPrefix(name, "sessions/")
+		if opts.Full && !strings.HasPrefix(name, ".") && name != "backups" && !strings.HasPrefix(name, "backups/") && !strings.HasPrefix(name, "db.sqlite-") {
+			allowed = true
+		}
 		if !allowed {
 			return result, fmt.Errorf("unsupported snapshot entry %q", name)
 		}
 		if h.Typeflag == tar.TypeDir {
-			if name != "sessions" && !strings.HasPrefix(name, "sessions/") {
+			if !opts.Full && name != "sessions" && !strings.HasPrefix(name, "sessions/") {
 				return result, errors.New("snapshot data file is a directory")
 			}
 			if err = root.MkdirAll(name, 0700); err != nil {

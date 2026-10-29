@@ -501,3 +501,21 @@ func (p *dropboxProvider) List(ctx context.Context, prefix string) ([]Object, er
 		_, err = p.rpc(ctx, "files/list_folder/continue", map[string]any{"cursor": cursor}, &page)
 	}
 }
+
+func (p *dropboxProvider) Download(ctx context.Context, name string, dst io.Writer) error {
+	ctx, done, err := p.life.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	if dst == nil || validObject(name) != nil {
+		return errors.New("invalid Dropbox download request")
+	}
+	arg, err := dropboxArg(map[string]any{"path": p.path(name)})
+	if err != nil {
+		return err
+	}
+	_, err = p.api.do(ctx, cloudRequest{op: "files/download", method: http.MethodPost,
+		url: p.ep.content + "/files/download", header: http.Header{"Dropbox-API-Arg": {arg}}, once: true, out: dst})
+	return err
+}

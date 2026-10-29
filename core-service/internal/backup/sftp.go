@@ -552,6 +552,27 @@ func (p *sftpProvider) Upload(ctx context.Context, name string, src io.ReadSeeke
 	return result, err
 }
 
+func (p *sftpProvider) Download(ctx context.Context, name string, dst io.Writer) error {
+	if dst == nil || validObject(name) != nil || name == "." {
+		return errors.New("invalid SFTP download request")
+	}
+	return p.with(ctx, "download", func(ctx context.Context, c *sftp.Client) error {
+		full, info, err := p.file(ctx, c, name, false)
+		if err != nil {
+			return sftpError(ctx, "inspect download", err)
+		}
+		if info == nil {
+			return fs.ErrNotExist
+		}
+		f, err := c.Open(full)
+		if err != nil {
+			return sftpError(ctx, "open download", err)
+		}
+		_, copyErr := io.Copy(dst, contextReader{ctx, f})
+		return errors.Join(copyErr, f.Close())
+	})
+}
+
 type sftpProgressReader struct {
 	r       io.Reader
 	tracker *transferProgress

@@ -25,7 +25,11 @@ func (m *Manager) prepareSnapshot(ctx context.Context, d destination, j job) (st
 		// Reserve distinct seconds in SQLite across destinations and rapid runs.
 		// A stable name survives a crash before/during archive construction.
 		for stamp := time.Now(); ; stamp = stamp.Add(time.Second) {
-			name := "snapshot-" + stamp.Format("20060102-150405") + ".tar.gz"
+			prefix := "snapshot-"
+			if j.Full {
+				prefix = "full-"
+			}
+			name := prefix + stamp.Format("20060102-150405") + ".tar.gz"
 			archive = filepath.Join(folder, name)
 			var n int
 			if err := m.opts.Reader.QueryRowContext(ctx, `SELECT count(*) FROM backup_jobs WHERE snapshot_path=?`, archive).Scan(&n); err != nil {
@@ -165,6 +169,84 @@ func (m *Manager) prepareSnapshot(ctx context.Context, d destination, j job) (st
 	if err != nil {
 		return "", "", err
 	}
+	if j.Full {
+		dataRoot, e := os.OpenRoot(m.opts.DataDir)
+		if e != nil {
+			return "", "", e
+		}
+		downloadsRel, relErr := filepath.Rel(m.opts.DataDir, m.opts.downloads())
+		externalDownloads := relErr != nil || downloadsRel == ".." || strings.HasPrefix(downloadsRel, ".."+string(filepath.Separator)) || filepath.IsAbs(downloadsRel)
+		e = fs.WalkDir(dataRoot.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("full backup refuses media symlink %s", name)
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			if !entry.Type().IsRegular() {
+				return fmt.Errorf("full backup refuses non-regular data entry %s", name)
+			}
+			if name == "db.sqlite" || strings.HasPrefix(name, "db.sqlite-") || name == ".tgdl-server.lock" || name == ".tgdl-engine.lock" ||
+				name == ".tgdl-full-restore-pending.json" || strings.HasPrefix(name, ".tgdl-session-") ||
+				name == "backups" || strings.HasPrefix(name, "backups/") ||
+				strings.HasSuffix(strings.ToLower(entry.Name()), ".part") ||
+				name == "config.json" || name == "secret.key" ||
+				name == "sessions" || strings.HasPrefix(name, "sessions/") ||
+				(externalDownloads && (name == "downloads" || strings.HasPrefix(name, "downloads/"))) {
+				return nil
+			}
+			file, err := dataRoot.Open(name)
+			if err != nil {
+				return err
+			}
+			return appendFile(filepath.ToSlash(name), file)
+		})
+		closeErr := dataRoot.Close()
+		if err = errors.Join(e, closeErr); err != nil {
+			return "", "", fmt.Errorf("archive application data: %w", err)
+		}
+		if externalDownloads {
+			media, e := os.OpenRoot(m.opts.downloads())
+			if e != nil {
+				return "", "", fmt.Errorf("open external downloads for full backup: %w", e)
+			}
+			e = fs.WalkDir(media.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
+				if walkErr != nil {
+					return walkErr
+				}
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if entry.Type()&os.ModeSymlink != 0 {
+					return fmt.Errorf("full backup refuses media symlink %s", name)
+				}
+				if entry.IsDir() {
+					return nil
+				}
+				if !entry.Type().IsRegular() {
+					return fmt.Errorf("full backup refuses non-regular media entry %s", name)
+				}
+				if strings.HasSuffix(strings.ToLower(entry.Name()), ".part") {
+					return nil
+				}
+				file, err := media.Open(name)
+				if err != nil {
+					return err
+				}
+				return appendFile("downloads/"+filepath.ToSlash(name), file)
+			})
+			closeErr = media.Close()
+			if err = errors.Join(e, closeErr); err != nil {
+				return "", "", fmt.Errorf("archive external downloads: %w", err)
+			}
+		}
+	}
 	if err = tw.Close(); err != nil {
 		return "", "", err
 	}
@@ -183,6 +265,10 @@ func (m *Manager) prepareSnapshot(ctx context.Context, d destination, j job) (st
 	if err = os.Rename(out.Name(), archive); err != nil {
 		return "", "", err
 	}
-	m.Log("info", fmt.Sprintf("snapshot built %s → enqueued for #%d", archive, d.ID))
+	if j.Full {
+		m.Log("info", fmt.Sprintf("full backup archive created: %s", archive))
+	} else {
+		m.Log("info", fmt.Sprintf("snapshot built %s → enqueued for #%d", archive, d.ID))
+	}
 	return archive, remote, nil
 }

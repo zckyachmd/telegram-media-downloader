@@ -222,6 +222,7 @@ CREATE TABLE backup_jobs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             destination_id  INTEGER NOT NULL,
             download_id     INTEGER,
+            full_snapshot   INTEGER NOT NULL DEFAULT 0,
             snapshot_path   TEXT,
             status          TEXT    NOT NULL DEFAULT 'pending',
             attempts        INTEGER NOT NULL DEFAULT 0,

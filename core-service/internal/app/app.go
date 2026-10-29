@@ -46,9 +46,11 @@ type Config struct {
 	SecureCookies       bool
 	DevMode             bool
 	Output              io.Writer
+	Restart             func()
 }
 type App struct {
 	devMode           bool
+	restart           func()
 	httpOptions       HTTPOptions
 	proxyPolicy       proxyPolicy
 	webPolicy         webPolicyCache
@@ -77,97 +79,101 @@ type App struct {
 	closeOnce         sync.Once
 	closeErr          error
 
-	backups             *backup.Manager
-	db                  *store.DB
-	library             *download.Library
-	sessions            *auth.SessionStore
-	webSockets          webSocketRegistry
-	hub                 *ws.Hub
-	read                *dbread.Handler
-	config              auth.ConfigStore
-	jobs                *jobs.Tracker
-	dataDir             string
-	cluster             cluster.Store
-	clusterHTTP         *cluster.Client
-	clusterMu           sync.Mutex
-	clusterWG           sync.WaitGroup
-	clusterClosed       bool
-	clusterSyncMu       sync.Mutex
-	clusterWake         chan struct{}
-	clusterSockets      *clusterSockets
-	clusterSweep        clusterSweepState
-	loginRL             *rateLimiter
-	handler             http.Handler
-	configMu            sync.Mutex
-	dedupMu             sync.Mutex
-	dedupWG             sync.WaitGroup
-	dedupClosed         bool
-	mediaMu             sync.RWMutex
-	purgeMu             sync.Mutex
-	purgeEpoch          uint64 // guarded by purgeMu; invalidates unresolved URL requests
-	purgeWG             sync.WaitGroup
-	purgeClosed         bool
-	purgeResume         bool
-	recoveryWriting     bool
-	recoveryMu          sync.Mutex
-	recoveryStatus      map[string]any
-	purges              map[string]purgeRecord
-	maintenanceJobMu    sync.Mutex
-	maintenanceJobWG    sync.WaitGroup
-	maintenanceClosed   bool
-	dedupLastScan       map[string]any
-	dedupScanStatus     map[string]any
-	dedupScanCancel     context.CancelFunc
-	dedupDeleteStatus   map[string]any
-	downloadsDir        string
-	restartMu           sync.Mutex
-	restartPending      bool
-	restartAttempt      int
-	monitorRunningSince time.Time
-	updateMu            sync.Mutex
-	updateStatus        map[string]any
-	leaveBatchMu        sync.Mutex
-	leaveBatchStatus    map[string]any
-	faststartMu         sync.Mutex
-	faststartStatus     map[string]any
-	faststartLastRun    map[string]any
-	thumbMu             sync.Mutex
-	thumbMisses         thumbMissCache
-	thumbBuildStatus    map[string]any
-	thumbBuildLastRun   map[string]any
-	thumbRebuildStatus  map[string]any
-	thumbBuildCancel    context.CancelFunc
-	seekbar             *seekbarState
-	maintenanceMu       sync.Mutex
-	telegramMaintenance map[string]map[string]any
-	storiesOp           sync.Mutex
-	dbIntegrityStatus   map[string]any
-	filesVerifyStatus   map[string]any
-	filesVerifyLastRun  map[string]any
-	filesSweeping       atomic.Bool // one integrity pass at a time, manual or periodic
-	diskRotatorMu       sync.Mutex  // one rotation pass at a time
-	diskRotatorWake     chan struct{}
-	diskRotatorStatus   map[string]any // guarded by maintenanceMu
-	reindexStatus       map[string]any
-	reindexLastRun      map[string]any
-	vacuumStatus        map[string]any
-	setupRL             *rateLimiter
-	secureCookies       bool
-	output              io.Writer
-	resetMu             sync.Mutex
-	resetTokens         map[string]time.Time
-	chatRecheckMu       sync.Mutex
-	chatRecheck         chatRecheckState
-	chatRecheckWG       sync.WaitGroup
-	chatRecheckClosed   bool
-	groupRefreshMu      sync.Mutex
-	groupRefreshInfo    groupRefreshState
-	groupRefreshPhotos  groupRefreshState
-	groupRefreshWG      sync.WaitGroup
-	groupRefreshClosed  bool
-	dialogPhotos        dialogPhotoCache
-	nsfw                *nsfwRuntime
-	faces               *facesService
+	backups              *backup.Manager
+	fullOperationMu      sync.Mutex
+	fullOperationRunning bool
+	fullOperationStatus  map[string]any
+	fullRestorePassword  []byte
+	db                   *store.DB
+	library              *download.Library
+	sessions             *auth.SessionStore
+	webSockets           webSocketRegistry
+	hub                  *ws.Hub
+	read                 *dbread.Handler
+	config               auth.ConfigStore
+	jobs                 *jobs.Tracker
+	dataDir              string
+	cluster              cluster.Store
+	clusterHTTP          *cluster.Client
+	clusterMu            sync.Mutex
+	clusterWG            sync.WaitGroup
+	clusterClosed        bool
+	clusterSyncMu        sync.Mutex
+	clusterWake          chan struct{}
+	clusterSockets       *clusterSockets
+	clusterSweep         clusterSweepState
+	loginRL              *rateLimiter
+	handler              http.Handler
+	configMu             sync.Mutex
+	dedupMu              sync.Mutex
+	dedupWG              sync.WaitGroup
+	dedupClosed          bool
+	mediaMu              sync.RWMutex
+	purgeMu              sync.Mutex
+	purgeEpoch           uint64 // guarded by purgeMu; invalidates unresolved URL requests
+	purgeWG              sync.WaitGroup
+	purgeClosed          bool
+	purgeResume          bool
+	recoveryWriting      bool
+	recoveryMu           sync.Mutex
+	recoveryStatus       map[string]any
+	purges               map[string]purgeRecord
+	maintenanceJobMu     sync.Mutex
+	maintenanceJobWG     sync.WaitGroup
+	maintenanceClosed    bool
+	dedupLastScan        map[string]any
+	dedupScanStatus      map[string]any
+	dedupScanCancel      context.CancelFunc
+	dedupDeleteStatus    map[string]any
+	downloadsDir         string
+	restartMu            sync.Mutex
+	restartPending       bool
+	restartAttempt       int
+	monitorRunningSince  time.Time
+	updateMu             sync.Mutex
+	updateStatus         map[string]any
+	leaveBatchMu         sync.Mutex
+	leaveBatchStatus     map[string]any
+	faststartMu          sync.Mutex
+	faststartStatus      map[string]any
+	faststartLastRun     map[string]any
+	thumbMu              sync.Mutex
+	thumbMisses          thumbMissCache
+	thumbBuildStatus     map[string]any
+	thumbBuildLastRun    map[string]any
+	thumbRebuildStatus   map[string]any
+	thumbBuildCancel     context.CancelFunc
+	seekbar              *seekbarState
+	maintenanceMu        sync.Mutex
+	telegramMaintenance  map[string]map[string]any
+	storiesOp            sync.Mutex
+	dbIntegrityStatus    map[string]any
+	filesVerifyStatus    map[string]any
+	filesVerifyLastRun   map[string]any
+	filesSweeping        atomic.Bool // one integrity pass at a time, manual or periodic
+	diskRotatorMu        sync.Mutex  // one rotation pass at a time
+	diskRotatorWake      chan struct{}
+	diskRotatorStatus    map[string]any // guarded by maintenanceMu
+	reindexStatus        map[string]any
+	reindexLastRun       map[string]any
+	vacuumStatus         map[string]any
+	setupRL              *rateLimiter
+	secureCookies        bool
+	output               io.Writer
+	resetMu              sync.Mutex
+	resetTokens          map[string]time.Time
+	chatRecheckMu        sync.Mutex
+	chatRecheck          chatRecheckState
+	chatRecheckWG        sync.WaitGroup
+	chatRecheckClosed    bool
+	groupRefreshMu       sync.Mutex
+	groupRefreshInfo     groupRefreshState
+	groupRefreshPhotos   groupRefreshState
+	groupRefreshWG       sync.WaitGroup
+	groupRefreshClosed   bool
+	dialogPhotos         dialogPhotoCache
+	nsfw                 *nsfwRuntime
+	faces                *facesService
 }
 
 var wsUpgrader = websocket.Upgrader{
@@ -214,6 +220,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	}
 	read := dbread.NewHandler(filepath.Join(cfg.DataDir, "db.sqlite"), nil)
 	a := &App{devMode: cfg.DevMode, db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("updateStatus"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbsRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
+	a.restart = cfg.Restart
 	a.httpOptions, a.proxyPolicy, a.apiRL = cfg.HTTP, proxy, newRateLimiter(10000, time.Minute)
 	a.seekbar = newSeekbarState()
 	a.faces = newFacesService(a)

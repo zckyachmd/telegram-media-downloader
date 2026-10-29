@@ -570,6 +570,32 @@ func (p *ftpProvider) List(ctx context.Context, prefix string) (out []Object, er
 	})
 	return out, err
 }
+
+func (p *ftpProvider) Download(ctx context.Context, name string, dst io.Writer) error {
+	if dst == nil || ftpObject(name) != nil {
+		return errors.New("invalid FTP download request")
+	}
+	return p.with(ctx, "download", nil, func(ctx context.Context, c *ftpSession) error {
+		dir, base := path.Split(name)
+		full := path.Join(p.settings.root, name)
+		entry, err := c.lookup(path.Join(p.settings.root, dir), base)
+		if err != nil {
+			return err
+		}
+		if entry == nil {
+			return fs.ErrNotExist
+		}
+		if entry.kind != "file" {
+			return ftpProblem("backup source is not a regular file")
+		}
+		data, err := c.data("RETR", full)
+		if err != nil {
+			return err
+		}
+		_, copyErr := io.Copy(dst, contextReader{ctx, data})
+		return c.finishData(data, copyErr)
+	})
+}
 func (p *ftpProvider) Test(ctx context.Context) (string, error) {
 	name, err := randomSFTPName(".tgdl-probe-")
 	if err != nil {

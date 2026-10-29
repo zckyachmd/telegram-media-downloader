@@ -429,6 +429,27 @@ func (p *s3Provider) List(ctx context.Context, prefix string) ([]Object, error) 
 		token = &next
 	}
 }
+
+func (p *s3Provider) Download(ctx context.Context, name string, dst io.Writer) error {
+	if dst == nil {
+		return errors.New("invalid S3 download request")
+	}
+	ctx, done, err := p.begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	key, err := p.key(name)
+	if err != nil {
+		return err
+	}
+	object, err := p.client.GetObject(ctx, &s3.GetObjectInput{Bucket: &p.bucket, Key: &key})
+	if err != nil {
+		return s3Error("GetObject", err)
+	}
+	_, copyErr := io.Copy(dst, contextReader{ctx, object.Body})
+	return errors.Join(copyErr, object.Body.Close())
+}
 func (p *s3Provider) Delete(ctx context.Context, name string) error {
 	ctx, done, err := p.begin(ctx)
 	if err != nil {
