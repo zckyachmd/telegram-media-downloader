@@ -7237,6 +7237,14 @@ body:not(.in-chat) [data-chat-only] {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 12px 14px;
 }
+.cd-caption-regex > .cd-subheading,
+.cd-caption-regex > .cd-help {
+    grid-column: 1 / -1;
+    margin: 0;
+}
+.cd-caption-regex > .cd-route-field {
+    align-self: start;
+}
 .cd-topic-toolbar {
     display: flex;
     align-items: center;

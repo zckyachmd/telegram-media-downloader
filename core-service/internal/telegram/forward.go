@@ -48,7 +48,16 @@ type ForwardMessageRequest struct {
 	Source, Destination string
 	MessageID, TopicID  int
 	Protect             bool
+	EditCaption         bool
+	EditMessageID       int
+	ResultMessageID     *int `json:"-"`
+	Caption             string
+	Entities            []tg.MessageEntityClass
 }
+
+// ErrForwardCaptionUnresolved reports that Telegram accepted the forward but
+// the app cannot confirm the requested caption or safely remove the copy.
+var ErrForwardCaptionUnresolved = errors.New("forwarded message may remain without the requested caption")
 
 type forwardAPI interface {
 	uploader.Client
@@ -69,6 +78,19 @@ func (a *Account) ForwardMessage(ctx context.Context, req ForwardMessageRequest)
 }
 
 func (s *fileSender) forward(ctx context.Context, req ForwardMessageRequest) (int, error) {
+	if req.EditCaption && req.EditMessageID > 0 {
+		destination, err := s.destination(ctx, req.Destination)
+		if err != nil {
+			return 0, fmt.Errorf("resolve destination: %w", err)
+		}
+		if req.ResultMessageID != nil {
+			*req.ResultMessageID = req.EditMessageID
+		}
+		if err := s.editForwardedCaption(ctx, destination, req.EditMessageID, req); err != nil {
+			return 0, err
+		}
+		return req.EditMessageID, nil
+	}
 	if req.MessageID <= 0 {
 		return 0, errors.New("invalid Telegram message id")
 	}
@@ -89,7 +111,74 @@ func (s *fileSender) forward(ctx context.Context, req ForwardMessageRequest) (in
 	if err != nil {
 		return 0, err
 	}
-	return sentMessageID(updates, id), nil
+	sentID := sentMessageID(updates, id)
+	if req.ResultMessageID != nil {
+		*req.ResultMessageID = sentID
+	}
+	if !req.EditCaption {
+		return sentID, nil
+	}
+	if sentID <= 0 {
+		return 0, fmt.Errorf("%w: Telegram forward response did not include the destination message id", ErrForwardCaptionUnresolved)
+	}
+	if err := s.editForwardedCaption(ctx, destination, sentID, req); err != nil {
+		return 0, err
+	}
+	return sentID, nil
+}
+
+func (s *fileSender) editForwardedCaption(ctx context.Context, destination tg.InputPeerClass, messageID int, req ForwardMessageRequest) error {
+	editor, ok := s.api.(interface {
+		MessagesEditMessage(context.Context, *tg.MessagesEditMessageRequest) (tg.UpdatesClass, error)
+	})
+	if !ok {
+		editErr := errors.New("Telegram API does not support editing forwarded captions")
+		if cleanupErr := s.deleteForwarded(ctx, destination, messageID); cleanupErr != nil {
+			return fmt.Errorf("%w: edit: %v; cleanup: %v", ErrForwardCaptionUnresolved, editErr, cleanupErr)
+		}
+		if req.ResultMessageID != nil {
+			*req.ResultMessageID = 0
+		}
+		return editErr
+	}
+	if _, err := editor.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{Peer: destination, ID: messageID, Message: req.Caption, Entities: req.Entities}); err == nil {
+		return nil
+	} else if cleanupErr := s.deleteForwarded(ctx, destination, messageID); cleanupErr != nil {
+		return fmt.Errorf("%w: edit: %v; cleanup: %v", ErrForwardCaptionUnresolved, err, cleanupErr)
+	} else {
+		if req.ResultMessageID != nil {
+			*req.ResultMessageID = 0
+		}
+		return fmt.Errorf("edit forwarded caption: %w", err)
+	}
+}
+
+func (s *fileSender) deleteForwarded(ctx context.Context, peer tg.InputPeerClass, messageID int) error {
+	var channel tg.InputChannelClass
+	switch channelPeer := peer.(type) {
+	case *tg.InputPeerChannel:
+		channel = &tg.InputChannel{ChannelID: channelPeer.ChannelID, AccessHash: channelPeer.AccessHash}
+	case *tg.InputPeerChannelFromMessage:
+		channel = &tg.InputChannelFromMessage{Peer: channelPeer.Peer, MsgID: channelPeer.MsgID, ChannelID: channelPeer.ChannelID}
+	}
+	if channel != nil {
+		deleter, ok := s.api.(interface {
+			ChannelsDeleteMessages(context.Context, *tg.ChannelsDeleteMessagesRequest) (*tg.MessagesAffectedMessages, error)
+		})
+		if !ok {
+			return errors.New("Telegram API does not support deleting channel messages")
+		}
+		_, err := deleter.ChannelsDeleteMessages(ctx, &tg.ChannelsDeleteMessagesRequest{Channel: channel, ID: []int{messageID}})
+		return err
+	}
+	deleter, ok := s.api.(interface {
+		MessagesDeleteMessages(context.Context, *tg.MessagesDeleteMessagesRequest) (*tg.MessagesAffectedMessages, error)
+	})
+	if !ok {
+		return errors.New("Telegram API does not support deleting forwarded messages")
+	}
+	_, err := deleter.MessagesDeleteMessages(ctx, &tg.MessagesDeleteMessagesRequest{Revoke: true, ID: []int{messageID}})
+	return err
 }
 
 // fileSender keeps the destinations it resolved for one account, so a busy

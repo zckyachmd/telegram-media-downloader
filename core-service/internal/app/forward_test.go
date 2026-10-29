@@ -28,10 +28,11 @@ type sentFile struct {
 }
 
 type fakeForwarder struct {
-	observing atomic.Bool
-	mu        sync.Mutex
-	sent      []sentFile
-	err       error
+	observing      atomic.Bool
+	mu             sync.Mutex
+	sent           []sentFile
+	forwardRequest []telegram.ForwardMessageRequest
+	err            error
 }
 
 func (f *fakeForwarder) Observing() bool { return f.observing.Load() }
@@ -52,6 +53,10 @@ func (f *fakeForwarder) SendFile(_ context.Context, account string, req telegram
 func (f *fakeForwarder) ForwardMessage(_ context.Context, account string, req telegram.ForwardMessageRequest) (string, int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.forwardRequest = append(f.forwardRequest, req)
+	if req.ResultMessageID != nil {
+		*req.ResultMessageID = 42
+	}
 	if account == "" {
 		account = "default"
 	}
@@ -63,6 +68,12 @@ func (f *fakeForwarder) calls() []sentFile {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]sentFile(nil), f.sent...)
+}
+
+func (f *fakeForwarder) forwards() []telegram.ForwardMessageRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]telegram.ForwardMessageRequest(nil), f.forwardRequest...)
 }
 
 func (f *fakeForwarder) fail(err error) {
@@ -132,7 +143,7 @@ func TestForwardProtectionInheritanceAndCaptionMethod(t *testing.T) {
 
 func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
 	ctx := context.Background()
-	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "captionMode": "native"})
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "directForward": true, "captionMode": "native"})
 	var directCalls atomic.Int32
 	transport := mediaTransport(func(context.Context, telegram.Attachment, io.Writer) error {
 		t.Fatal("direct forward downloaded media")
@@ -195,9 +206,121 @@ func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
 	}
 }
 
+func TestCustomCaptionUsesDirectForwardThenEdit(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{
+		"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
+		"directForward": true, "captionMode": "custom", "captionBase": "custom",
+		"caption": "Hi {{source_name}} #{{message_id}}",
+	})
+	transport := mediaTransport(func(context.Context, telegram.Attachment, io.Writer) error {
+		t.Fatal("custom caption direct path downloaded media")
+		return nil
+	})
+	var request telegram.ForwardMessageRequest
+	_, err := a.ingestTelegramWithForward(ctx, docMessage(13, 123, 80, "source caption"), "", "Source", "acct1", transport, func(_ context.Context, req telegram.ForwardMessageRequest) error {
+		request = req
+		if req.ResultMessageID != nil {
+			*req.ResultMessageID = 42
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !request.EditCaption || request.Caption != "Hi Source #13" {
+		t.Fatalf("native forward request=%+v", request)
+	}
+	if len(fake.calls()) != 0 {
+		t.Fatalf("unexpected upload calls: %d", len(fake.calls()))
+	}
+	if _, exists := rowPath(t, a, "-1000000000123", 13); exists {
+		t.Fatal("direct-forwarded media was saved locally")
+	}
+}
+
+func TestUnresolvedCustomCaptionForwardFailsQueueWithoutDownload(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{
+		"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
+		"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "custom",
+	})
+	transport := mediaTransport(func(context.Context, telegram.Attachment, io.Writer) error {
+		t.Fatal("unresolved caption edit must not start duplicate fallback upload")
+		return nil
+	})
+	_, err := a.ingestTelegramWithForward(ctx, docMessage(14, 123, 81, "source caption"), "", "Source", "acct1", transport, func(_ context.Context, request telegram.ForwardMessageRequest) error {
+		if request.ResultMessageID != nil {
+			*request.ResultMessageID = 9001
+		}
+		return telegram.ErrForwardCaptionUnresolved
+	})
+	if !errors.Is(err, telegram.ErrForwardCaptionUnresolved) {
+		t.Fatalf("err=%v", err)
+	}
+	var status, stage, states string
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,stage,destinations_json FROM tgdl_forward_queue ORDER BY id DESC LIMIT 1`).Scan(&status, &stage, &states); err != nil {
+		t.Fatal(err)
+	}
+	var destinations []forwardDestination
+	if err := json.Unmarshal([]byte(states), &destinations); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || stage != "caption_edit_failed" || len(destinations) != 1 || !destinations[0].DirectFailed || destinations[0].DestinationMessageID != 9001 {
+		t.Fatalf("status=%q stage=%q destinations=%+v", status, stage, destinations)
+	}
+}
+
+func TestRetryCaptionEditUsesSavedDestinationMessageID(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{
+		"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
+		"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption",
+	})
+	a.forward(ctx, forwardJob{
+		groupID: "-1000000000123", groupName: "Source", messageID: 14, text: "source caption",
+		settings: map[string]any{
+			"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
+			"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption",
+		},
+		stage: "caption_edit_failed",
+		destinations: []forwardDestination{{
+			Settings: map[string]any{"destination": "@Archive", "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption"},
+			Status:   "processing", DirectFailed: true, DestinationMessageID: 9001,
+		}},
+	})
+	requests := fake.forwards()
+	if len(requests) != 1 || requests[0].EditMessageID != 9001 || !requests[0].EditCaption || requests[0].MessageID != 14 {
+		t.Fatalf("retry requests=%+v", requests)
+	}
+}
+
+func TestUnresolvedCustomCaptionWithoutMessageIDDoesNotRetryAsNewForward(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{
+		"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
+		"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption",
+	})
+	a.forward(ctx, forwardJob{
+		groupID: "-1000000000123", groupName: "Source", messageID: 14,
+		settings: map[string]any{
+			"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
+			"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption",
+		},
+		stage: "caption_edit_failed",
+		destinations: []forwardDestination{{
+			Settings: map[string]any{"destination": "@Archive", "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption"},
+			Status:   "processing", DirectFailed: true,
+		}},
+	})
+	if len(fake.forwards()) != 0 {
+		t.Fatalf("unsafe retry created another forward: %+v", fake.forwards())
+	}
+}
+
 func TestDirectForwardFailureDownloadsThenUploads(t *testing.T) {
 	ctx := context.Background()
-	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "captionMode": "native"})
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "directForward": true, "captionMode": "native"})
 	var directCalls, downloads atomic.Int32
 	transport := mediaTransport(func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
 		downloads.Add(1)

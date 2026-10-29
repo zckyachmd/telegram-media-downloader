@@ -60,7 +60,7 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 	if err != nil {
 		return download.Record{}, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
 	}
-	if forward && forwardSettings["deleteAfterForward"] == true && forwardSettings["directForward"] != false && directForward != nil && ttl == 0 && !item.SkipDuplicates && len(matchingForwardRoutes(forwardSettings, telegram.MessageTopicID(message))) > 0 {
+	if forward && forwardSettings["directForward"] == true && forwardSettings["deleteAfterForward"] == true && directForward != nil && ttl == 0 && !item.SkipDuplicates && len(matchingForwardRoutes(forwardSettings, telegram.MessageTopicID(message))) > 0 {
 		cfg, _ := a.config.Load(ctx)
 		topicID := telegram.MessageTopicID(message)
 		needsUpload := false
@@ -68,7 +68,8 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 		for _, route := range matchingForwardRoutes(forwardSettings, topicID) {
 			settings := effectiveForwardProtection(inheritCaptionSettings(route, forwardSettings), forwardSettings, route, topicID, cfg)
 			destinations = append(destinations, forwardDestination{Settings: settings, Status: "pending"})
-			if settings["protect"] == true || customCaption(settings) {
+			captionCanEditAfterForward := toString(settings["captionMode"]) == "custom"
+			if settings["protect"] == true || (customCaption(settings) && !captionCanEditAfterForward) {
 				needsUpload = true
 			}
 		}
@@ -79,6 +80,15 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 				return download.Record{}, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, errors.New("forward queue is full"))
 			}
 			if err := a.directForwardNow(ctx, &job); err != nil {
+				if errors.Is(err, telegram.ErrForwardCaptionUnresolved) {
+					job.stage = "caption_edit_failed"
+					a.updateForwardReservation(ctx, job, "failed", err.Error())
+					a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
+					a.failProcessingForward(context.WithoutCancel(ctx), attemptID, err)
+					return download.Record{}, err
+				}
+				job.stage = "fallback_download"
+				a.persistForwardProgress(ctx, job)
 				record, downloadErr := a.library.Ingest(ctx, item, telegram.AttachmentClient{Source: transport, Media: attachment})
 				if downloadErr != nil {
 					a.updateForwardReservation(ctx, job, "failed", downloadErr.Error())
@@ -105,23 +115,25 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 						lastPending = i
 					}
 				}
+				job.stage = "fallback_upload"
+				a.persistForwardProgress(ctx, job)
 				for i := range job.destinations {
 					if job.destinations[i].Status == "forwarded" {
 						continue
 					}
 					settings := job.destinations[i].Settings
-					if toString(settings["captionMode"]) == "native" {
-						settings = cloneMap(settings)
-						settings["captionMode"] = "source_info"
-					}
+					job.destinations[i].Status, job.destinations[i].Method = "processing", "upload"
+					a.persistForwardProgress(ctx, job)
 					deleteAfter := forwardSettings["deleteAfterForward"] == true && i == lastPending
-					if !a.forwardToRoute(ctx, job, forwardAccountID, settings, deleteAfter) {
+					if !a.forwardToRoute(ctx, &job, forwardAccountID, settings, deleteAfter) {
 						err := errors.New("direct forward failed and upload fallback failed")
 						a.updateForwardReservation(ctx, job, "failed", err.Error())
 						a.failProcessingForward(context.WithoutCancel(ctx), attemptID, err)
 						return record, err
 					}
 					job.destinations[i].Status, job.destinations[i].Method = "forwarded", "upload"
+					job.destinations[i].Reason = ""
+					a.persistForwardProgress(ctx, job)
 				}
 				if err := a.finishProcessingAttempt(ctx, attemptID, "downloaded", "", record.SHA256, "forwarded"); err != nil {
 					return record, err

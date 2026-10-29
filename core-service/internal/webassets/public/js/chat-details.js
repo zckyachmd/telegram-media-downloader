@@ -74,6 +74,7 @@ const TOGGLE_SAVE_MS = 150;
 
 // One page open at a time.
 let cur = null; // { id, name, group, fromApp, prev, prevGroup, stats }
+let globalForwardProtection = null;
 let pending = null; // merged PUT body waiting to be sent
 let saveTimer = null;
 let inflight = null;
@@ -92,6 +93,44 @@ function root() {
     el.className = 'hidden';
     host.appendChild(el);
     return el;
+}
+
+function fwdSettingsNow() {
+    return cur?.group?.autoForward || cur?.draftAutoForward || {};
+}
+
+function forwardProtectionIsEnabled(settings = fwdSettingsNow()) {
+    if (settings.protect != null) return settings.protect === true || settings.protect === 'on';
+    if (globalForwardProtection != null) return globalForwardProtection;
+    const configured = state.config?.forwarding?.protect;
+    return configured == null ? true : configured === true;
+}
+
+function canTryDirectForwardNow(settings = fwdSettingsNow()) {
+    return settings.deleteAfterForward === true && !forwardProtectionIsEnabled(settings);
+}
+
+function updateChatAutoForward(patch) {
+    if (!cur) return;
+    if (cur.group) cur.group.autoForward = { ...(cur.group.autoForward || {}), ...patch };
+    else cur.draftAutoForward = { ...(cur.draftAutoForward || {}), ...patch };
+}
+
+function syncDirectForwardToggle(settings = fwdSettingsNow()) {
+    const current = document.getElementById('fwd-direct-toggle');
+    if (!canTryDirectForwardNow(settings)) {
+        current?.remove();
+        return;
+    }
+    if (current) return;
+    const template = document.createElement('template');
+    template.innerHTML = switchRow({
+        id: 'fwd-direct-toggle',
+        label: i18nT('group.fwd.direct', 'Try direct forward first'),
+        sub: i18nT('group.fwd.direct_help', 'When caption and protection settings allow, Telegram forwarding avoids a local download. If Telegram rejects it, the job downloads and uploads the media.'),
+        on: settings.directForward === true,
+    });
+    document.getElementById('fwd-delete-toggle')?.after(template.content.firstElementChild);
 }
 
 /** Make sure #page-chat exists before renderPage() toggles `hidden`. */
@@ -431,9 +470,14 @@ function appendForwardRoute() {
 }
 
 function globalCaptionFields(settings = {}) {
-    const mode = ['source_info', 'source', 'none', 'override', 'regex'].includes(settings.captionMode)
-        ? settings.captionMode
-        : 'source_info';
+    const savedMode = settings.captionMode;
+    const mode = ['source_info', 'source', 'none', 'override', 'regex', 'custom'].includes(savedMode)
+        ? ['source_info', 'override', 'regex'].includes(savedMode) ? 'custom' : savedMode
+        : 'source';
+    let caption = settings.caption || (savedMode === 'source_info' ? '{{source_caption}}\n\n{{source_info}}' : '');
+    if (savedMode === 'regex' || (savedMode === 'custom' && settings.captionBase === 'source')) {
+        caption = '{{source_caption}}';
+    }
     return `<div class="cd-caption-fields" data-global-caption>
         <div class="cd-route-field">
             <label class="cd-label" for="fwd-caption-mode-trigger">${escapeHtml(i18nT('group.fwd.caption_mode', 'Group caption'))}</label>
@@ -446,23 +490,28 @@ function globalCaptionFields(settings = {}) {
                     <div class="cd-select-options" data-select-options role="listbox"></div>
                 </div>
                 <select id="fwd-caption-mode" class="cd-native-select" data-global-caption-mode data-selected="${escapeHtml(mode)}" tabindex="-1" aria-hidden="true">
-                    <option value="source_info" ${mode === 'source_info' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.caption_source_info', 'Source caption + source info'))}</option>
-                    <option value="source" ${mode === 'source' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.caption_source', 'Source caption only'))}</option>
+                    <option value="source" ${mode === 'source' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.caption_source', 'Use caption from source message'))}</option>
                     <option value="none" ${mode === 'none' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.caption_none', 'No caption'))}</option>
-                    <option value="override" ${mode === 'override' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.caption_override', 'Override caption'))}</option>
-                    <option value="regex" ${mode === 'regex' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.caption_regex', 'Regex transform'))}</option>
+                    <option value="custom" ${mode === 'custom' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.caption_custom', 'Customize caption'))}</option>
                 </select>
             </div>
         </div>
-        <div class="cd-route-field cd-caption-full ${mode === 'override' ? '' : 'hidden'}" data-global-caption-override-wrap>
-            <label class="cd-label" for="fwd-caption-override">${escapeHtml(i18nT('group.fwd.override_text', 'Caption text'))}</label>
-            <textarea id="fwd-caption-override" class="tg-input cd-input" rows="2" data-global-caption-override>${escapeHtml(settings.caption || '')}</textarea>
+        <div class="cd-route-field cd-caption-full ${mode === 'custom' ? '' : 'hidden'}" data-global-caption-override-wrap>
+            <label class="cd-label" for="fwd-caption-override">${escapeHtml(i18nT('group.fwd.override_text', 'Custom caption text'))}</label>
+            <textarea id="fwd-caption-override" class="tg-input cd-input" rows="2" data-global-caption-override>${escapeHtml(caption)}</textarea>
+            <p class="cd-help">${escapeHtml(i18nT('group.fwd.caption_custom_help', 'Template variables for the replacement caption and regex Replace with: {{source_caption}}, {{source_name}}, {{source_id}}, {{message_id}}, {{source_info}}, {{source_link}} (when available).'))}</p>
         </div>
-        <div class="cd-caption-full cd-caption-regex ${mode === 'regex' ? '' : 'hidden'}" data-global-caption-regex-wrap>
-            <div class="cd-route-field"><label class="cd-label" for="fwd-caption-regex">${escapeHtml(i18nT('group.fwd.regex_pattern', 'Find (regular expression)'))}</label>
-            <input id="fwd-caption-regex" class="tg-input cd-input" type="text" data-global-caption-regex value="${escapeHtml(settings.regexPattern || '')}"></div>
-            <div class="cd-route-field"><label class="cd-label" for="fwd-caption-replacement">${escapeHtml(i18nT('group.fwd.regex_replacement', 'Replace with'))}</label>
-            <textarea id="fwd-caption-replacement" class="tg-input cd-input" rows="2" data-global-caption-replacement>${escapeHtml(settings.regexReplacement || '')}</textarea></div>
+        <div class="cd-caption-full cd-caption-regex ${mode === 'custom' ? '' : 'hidden'}" data-global-caption-regex-wrap>
+            <p class="cd-subheading">${escapeHtml(i18nT('group.fwd.regex_transform', 'Regex transform (optional)'))}</p>
+            <p class="cd-help">${escapeHtml(i18nT('group.fwd.regex_help', 'Find and replace text in the custom caption. Leave the pattern empty to skip this step.'))}</p>
+            <div class="cd-route-field">
+                <label class="cd-label" for="fwd-caption-regex">${escapeHtml(i18nT('group.fwd.regex_pattern', 'Find pattern (regular expression)'))}</label>
+                <input id="fwd-caption-regex" class="tg-input cd-input" type="text" data-global-caption-regex value="${escapeHtml(settings.regexPattern || '')}">
+            </div>
+            <div class="cd-route-field">
+                <label class="cd-label" for="fwd-caption-replacement">${escapeHtml(i18nT('group.fwd.regex_replacement', 'Replace with'))}</label>
+                <textarea id="fwd-caption-replacement" class="tg-input cd-input" rows="2" data-global-caption-replacement>${escapeHtml(settings.regexReplacement || '')}</textarea>
+            </div>
         </div>
     </div>`;
 }
@@ -716,7 +765,7 @@ function render() {
     const el = root();
     if (!el || !cur) return;
     const g = cur.group;
-    const fwd = g?.autoForward || {};
+    const fwd = fwdSettingsNow();
     const savedRoutes = Array.isArray(fwd.routes) ? fwd.routes : [];
     const forwardRoutes = savedRoutes.filter((route) => String(route?.destinationGroupId || '').trim());
     if (!forwardRoutes.length && !Array.isArray(fwd.routes) && fwd.destination) {
@@ -728,6 +777,8 @@ function render() {
     if (!forwardRoutes.length) forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: 'storage' });
     const forwardingConfigured = forwardRoutes.length > 0 && forwardRoutes.every((route) => String(route.destinationGroupId || '').trim());
     const forwardingEnabled = fwd.enabled === true;
+    const forwardProtectionEnabled = forwardProtectionIsEnabled(fwd);
+    const canTryDirectForward = fwd.deleteAfterForward === true && !forwardProtectionEnabled;
     const topicRule = g?.topics || {};
     const forumTopics = Array.isArray(cur.forumTopics) ? cur.forumTopics : [];
     const selectedTopics = new Set((topicRule.ids || []).map(String));
@@ -878,7 +929,7 @@ function render() {
                         sub: fwd.protect == null
                             ? i18nT('group.fwd.protection_inherit', 'Following global protection rule')
                             : i18nT('group.fwd.protection_override', 'Overrides global protection rule'),
-                        on: fwd.protect == null ? false : fwd.protect === true || fwd.protect === 'on',
+                        on: forwardProtectionEnabled,
                     })}
                     ${switchRow({
                         id: 'fwd-delete-toggle',
@@ -886,11 +937,11 @@ function render() {
                         sub: i18nT('group.fwd.delete_after_help', 'Remove local file after successful upload.'),
                         on: fwd.deleteAfterForward === true,
                     })}
-                    ${fwd.deleteAfterForward === true ? switchRow({
+                    ${canTryDirectForward ? switchRow({
                         id: 'fwd-direct-toggle',
                         label: i18nT('group.fwd.direct', 'Try direct forward first'),
-                        sub: i18nT('group.fwd.direct_help', 'Protection requires download and upload. Otherwise, Telegram forwarding is tried first; if blocked, download and upload are used. The local file is removed after successful delivery.'),
-                        on: fwd.directForward !== false,
+                        sub: i18nT('group.fwd.direct_help', 'When caption and protection settings allow, Telegram forwarding avoids a local download. If Telegram rejects it, the job downloads and uploads the media.'),
+                        on: fwd.directForward === true,
                     }) : ''}
                     ${globalCaptionFields(fwd)}
                     <section class="cd-route-section" aria-labelledby="cd-routes-title">
@@ -1277,7 +1328,7 @@ async function flush() {
                 setSwitch('fwd-enable-toggle', savedEnabled);
                 document.getElementById('fwd-settings')?.classList.toggle('hidden', !savedEnabled);
             }
-            if ((e?.data?.error || e?.data?.message) === 'auto-forward requires at least one destination route') {
+            if ((e?.data?.error || e?.data?.message) === 'choose a forwarding destination before enabling auto-forward') {
                 setSwitch('fwd-enable-toggle', false);
                 document.getElementById('fwd-settings')?.classList.remove('hidden');
                 document.querySelector('[data-forward-route-required]')?.classList.remove('hidden');
@@ -1352,7 +1403,8 @@ function topicsPatch() {
 function globalCaptionPatch() {
     return {
         autoForward: {
-            captionMode: document.getElementById('fwd-caption-mode')?.value || 'source_info',
+            captionMode: document.getElementById('fwd-caption-mode')?.value || 'source',
+            captionBase: 'custom',
             caption: document.getElementById('fwd-caption-override')?.value || '',
             regexPattern: document.getElementById('fwd-caption-regex')?.value || '',
             regexReplacement: document.getElementById('fwd-caption-replacement')?.value || '',
@@ -1648,31 +1700,29 @@ function onClick(e) {
         } else if (sw.id === 'fwd-enable-toggle') {
             setSwitch(sw.id, on);
             document.getElementById('fwd-settings')?.classList.toggle('hidden', !on);
-            queueSave({ autoForward: { enabled: on } });
+            const routes = on ? collectForwardRoutes() : undefined;
+            const configured = Array.isArray(routes) && routes.length > 0;
+            document.querySelector('[data-forward-route-required]')?.classList.toggle('hidden', configured);
+            queueSave({ autoForward: { enabled: on, ...(on ? { routes } : {}) } });
         } else if (sw.id === 'fwd-delete-toggle') {
             setSwitch(sw.id, on);
             const autoForward = { deleteAfterForward: on };
-            if (!on) autoForward.directForward = false;
+            if (!on || forwardProtectionIsEnabled()) autoForward.directForward = false;
             queueSave({ autoForward });
-            cur.group.autoForward = { ...(cur.group.autoForward || {}), ...autoForward };
-            const directToggle = document.getElementById('fwd-direct-toggle');
-            if (!on) directToggle?.remove();
-            else if (!directToggle) {
-                const template = document.createElement('template');
-                template.innerHTML = switchRow({
-                    id: 'fwd-direct-toggle',
-                    label: i18nT('group.fwd.direct', 'Try direct forward first'),
-                    sub: i18nT('group.fwd.direct_help', 'Protection requires download and upload. Otherwise, Telegram forwarding is tried first; if blocked, download and upload are used. The local file is removed after successful delivery.'),
-                    on: cur.group.autoForward.directForward !== false,
-                });
-                document.getElementById('fwd-delete-toggle')?.after(template.content.firstElementChild);
-            }
+            updateChatAutoForward(autoForward);
+            syncDirectForwardToggle({ ...fwdSettingsNow(), ...autoForward });
         } else if (sw.id === 'fwd-direct-toggle') {
+            if (!on || !canTryDirectForwardNow()) return;
             setSwitch(sw.id, on);
+            updateChatAutoForward({ directForward: on });
             queueSave({ autoForward: { directForward: on } });
         } else if (sw.id === 'fwd-protect-toggle') {
             setSwitch(sw.id, on);
-            queueSave({ autoForward: { protect: on } });
+            const autoForward = { protect: on };
+            if (on) autoForward.directForward = false;
+            queueSave({ autoForward });
+            updateChatAutoForward(autoForward);
+            syncDirectForwardToggle();
         } else if (sw.id === 'topics-enable-toggle') {
             setSwitch(sw.id, on);
             document.getElementById('topics-settings')?.classList.toggle('hidden', !on);
@@ -1712,8 +1762,8 @@ async function onChange(e) {
     if (!cur) return;
     const id = e.target.id;
     if (e.target.matches('[data-global-caption-mode]')) {
-        document.querySelector('[data-global-caption-override-wrap]')?.classList.toggle('hidden', e.target.value !== 'override');
-        document.querySelector('[data-global-caption-regex-wrap]')?.classList.toggle('hidden', e.target.value !== 'regex');
+        document.querySelector('[data-global-caption-override-wrap]')?.classList.toggle('hidden', e.target.value !== 'custom');
+        document.querySelector('[data-global-caption-regex-wrap]')?.classList.toggle('hidden', e.target.value !== 'custom');
         queueSave(globalCaptionPatch(), 0);
     } else if (e.target.closest('[data-global-caption]')) {
         queueSave(globalCaptionPatch(), 0);
@@ -1995,6 +2045,7 @@ export function showChatDetails({ groupId, from = null, fromGroup = null, onName
         clusterEditable: false,
         accountCount: (state.dialogsAccounts || []).length,
     };
+    globalForwardProtection = null;
     pending = null;
     render();
     wire(el);
@@ -2004,6 +2055,15 @@ export function showChatDetails({ groupId, from = null, fromGroup = null, onName
     loadStats(token);
     loadAccountsAndPeers(token);
     loadDialogMeta(token);
+    void api.get('/api/config').then((config) => {
+        globalForwardProtection = config?.forwarding?.protect === true;
+        if (cur?.token !== token) return;
+        if (fwdSettingsNow().protect == null) setSwitch('fwd-protect-toggle', globalForwardProtection);
+        syncDirectForwardToggle();
+    }).catch(() => {
+        globalForwardProtection = null;
+        if (cur?.token === token) syncDirectForwardToggle();
+    });
 }
 
 /** The router is leaving the page — send any edit still waiting. */

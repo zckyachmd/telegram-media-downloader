@@ -12,11 +12,17 @@ import (
 )
 
 type fakeForwardAPI struct {
-	uploaded  bytes.Buffer
-	sent      []*tg.MessagesSendMediaRequest
-	created   int
-	dialogs   int
-	dialogsFn func() tg.MessagesDialogsClass
+	uploaded       bytes.Buffer
+	sent           []*tg.MessagesSendMediaRequest
+	forwards       []*tg.MessagesForwardMessagesRequest
+	edits          []*tg.MessagesEditMessageRequest
+	deleted        []*tg.MessagesDeleteMessagesRequest
+	deletedChannel []*tg.ChannelsDeleteMessagesRequest
+	editErr        error
+	deleteErr      error
+	created        int
+	dialogs        int
+	dialogsFn      func() tg.MessagesDialogsClass
 }
 
 func (f *fakeForwardAPI) UploadSaveFilePart(_ context.Context, r *tg.UploadSaveFilePartRequest) (bool, error) {
@@ -47,8 +53,21 @@ func (f *fakeForwardAPI) MessagesSendMedia(_ context.Context, r *tg.MessagesSend
 	f.sent = append(f.sent, r)
 	return &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateMessageID{ID: 900 + len(f.sent), RandomID: r.RandomID}}}, nil
 }
-func (f *fakeForwardAPI) MessagesForwardMessages(context.Context, *tg.MessagesForwardMessagesRequest) (tg.UpdatesClass, error) {
-	return &tg.Updates{}, nil
+func (f *fakeForwardAPI) MessagesForwardMessages(_ context.Context, r *tg.MessagesForwardMessagesRequest) (tg.UpdatesClass, error) {
+	f.forwards = append(f.forwards, r)
+	return &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateMessageID{ID: 777, RandomID: r.RandomID[0]}}}, nil
+}
+func (f *fakeForwardAPI) MessagesEditMessage(_ context.Context, r *tg.MessagesEditMessageRequest) (tg.UpdatesClass, error) {
+	f.edits = append(f.edits, r)
+	return nil, f.editErr
+}
+func (f *fakeForwardAPI) MessagesDeleteMessages(_ context.Context, r *tg.MessagesDeleteMessagesRequest) (*tg.MessagesAffectedMessages, error) {
+	f.deleted = append(f.deleted, r)
+	return &tg.MessagesAffectedMessages{}, f.deleteErr
+}
+func (f *fakeForwardAPI) ChannelsDeleteMessages(_ context.Context, r *tg.ChannelsDeleteMessagesRequest) (*tg.MessagesAffectedMessages, error) {
+	f.deletedChannel = append(f.deletedChannel, r)
+	return &tg.MessagesAffectedMessages{}, f.deleteErr
 }
 func (f *fakeForwardAPI) ChannelsCreateChannel(_ context.Context, r *tg.ChannelsCreateChannelRequest) (tg.UpdatesClass, error) {
 	f.created++
@@ -88,6 +107,63 @@ func TestSendFileUploadsToSavedMessagesWithCaption(t *testing.T) {
 	}
 	if req.Message != "hello\n\n📌 Source: Chat" || len(req.Entities) != 1 {
 		t.Fatalf("caption=%q entities=%v", req.Message, req.Entities)
+	}
+}
+
+func TestForwardMessageEditsCaptionWithoutUploadingMedia(t *testing.T) {
+	api := &fakeForwardAPI{}
+	sender := newTestSender(api, nil, nil)
+	entities := []tg.MessageEntityClass{&tg.MessageEntityBold{Offset: 0, Length: 5}}
+	id, err := sender.forward(context.Background(), ForwardMessageRequest{
+		Source: "me", Destination: "me", MessageID: 12,
+		EditCaption: true, Caption: "hello", Entities: entities,
+	})
+	if err != nil || id != 777 {
+		t.Fatalf("id=%d err=%v", id, err)
+	}
+	if len(api.forwards) != 1 || len(api.edits) != 1 || len(api.sent) != 0 || api.uploaded.Len() != 0 {
+		t.Fatalf("forwards=%d edits=%d uploads=%d bytes=%d", len(api.forwards), len(api.edits), len(api.sent), api.uploaded.Len())
+	}
+	if api.edits[0].ID != 777 || api.edits[0].Message != "hello" || len(api.edits[0].Entities) != 1 {
+		t.Fatalf("edit request=%+v", api.edits[0])
+	}
+}
+
+func TestForwardCaptionEditFailureCleansCopyBeforeFallback(t *testing.T) {
+	editErr := errors.New("caption edit rejected")
+	api := &fakeForwardAPI{editErr: editErr}
+	sender := newTestSender(api, nil, nil)
+	_, err := sender.forward(context.Background(), ForwardMessageRequest{Source: "me", Destination: "me", MessageID: 12, EditCaption: true, Caption: "custom"})
+	if !errors.Is(err, editErr) || errors.Is(err, ErrForwardCaptionUnresolved) {
+		t.Fatalf("err=%v", err)
+	}
+	if len(api.deleted) != 1 || !api.deleted[0].Revoke || len(api.deleted[0].ID) != 1 || api.deleted[0].ID[0] != 777 {
+		t.Fatalf("cleanup requests=%+v", api.deleted)
+	}
+}
+
+func TestForwardCaptionCleanupFailureIsMarkedUnresolved(t *testing.T) {
+	api := &fakeForwardAPI{editErr: errors.New("caption edit rejected"), deleteErr: errors.New("delete rejected")}
+	sender := newTestSender(api, nil, nil)
+	_, err := sender.forward(context.Background(), ForwardMessageRequest{Source: "me", Destination: "me", MessageID: 12, EditCaption: true, Caption: "custom"})
+	if !errors.Is(err, ErrForwardCaptionUnresolved) {
+		t.Fatalf("expected unresolved forward error, got %v", err)
+	}
+}
+
+func TestRetryEditsSavedDestinationMessageWithoutForwardingAgain(t *testing.T) {
+	api := &fakeForwardAPI{}
+	sender := newTestSender(api, nil, nil)
+	var resultID int
+	id, err := sender.forward(context.Background(), ForwardMessageRequest{
+		Destination: "me", MessageID: 12, EditCaption: true, EditMessageID: 777,
+		ResultMessageID: &resultID, Caption: "custom",
+	})
+	if err != nil || id != 777 || resultID != 777 {
+		t.Fatalf("id=%d resultID=%d err=%v", id, resultID, err)
+	}
+	if len(api.forwards) != 0 || len(api.edits) != 1 || api.edits[0].ID != 777 {
+		t.Fatalf("forwards=%d edits=%+v", len(api.forwards), api.edits)
 	}
 }
 

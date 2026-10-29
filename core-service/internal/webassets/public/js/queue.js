@@ -515,7 +515,7 @@ function renderForwardQueue(data) {
     const allItems = data.items || [];
     const items = allItems.filter((item) => forwardOnly
         ? item.status !== 'not_applicable'
-        : item.status === 'pending' || item.status === 'processing');
+        : ['pending', 'processing', 'failed', 'interrupted'].includes(item.status));
     if (!items.length) {
         const emptyKey = forwardOnly ? 'queue.forward.empty' : 'queue.forward.empty_pending';
         const emptyFallback = forwardOnly ? 'No forward jobs recorded' : 'No jobs are waiting to be forwarded';
@@ -535,8 +535,13 @@ function renderForwardQueue(data) {
         const destinations = (item.destinations || []).join(', ') || '—';
         const statusKey = statuses[item.status];
         const status = statusKey ? i18nT(statusKey, item.status) : (item.status || '—');
+        const stage = item.stage === 'fallback_download'
+            ? i18nT('queue.forward.stage.fallback_download', 'Downloading fallback')
+            : item.stage === 'fallback_upload'
+                ? i18nT('queue.forward.stage.fallback_upload', 'Uploading fallback')
+                : (item.stage || '—');
         const reason = item.reason ? `<span class="text-red-400/80 truncate">${escapeHtml(item.reason)}</span>` : '';
-        const destinationsDetail = (item.destinationStates || []).map((d) => `${d.method || '—'} · ${d.status || 'pending'}${d.settings?.protect ? ' · protected' : ''}`).join('; ');
+        const destinationsDetail = (item.destinationStates || []).map((d) => `${d.method || '—'} · ${d.status || 'pending'}${d.settings?.protect ? ' · protected' : ''}${d.directFailed ? ` · ${i18nT('queue.forward.direct_failed', 'Direct failed')}` : ''}`).join('; ');
         const retry = ['failed', 'interrupted'].includes(item.status)
             ? `<button type="button" class="tg-btn tg-btn-sm" data-forward-retry="${escapeHtml(item.id)}">${escapeHtml(i18nT('queue.forward.retry', 'Retry failed destinations'))}</button>`
             : '';
@@ -544,7 +549,7 @@ function renderForwardQueue(data) {
             <span class="min-w-0 flex-1"><span class="text-tg-text">${escapeHtml(item.fileName || `#${item.messageId}`)}</span>
                 <span class="text-tg-textSecondary"> · ${escapeHtml(group)} · #${escapeHtml(item.messageId)}</span></span>
             <span class="text-tg-textSecondary truncate" title="${escapeHtml(destinations)}">${escapeHtml(i18nT('queue.forward.destination', 'To'))}: ${escapeHtml(destinations)}</span>
-            <span class="shrink-0 text-tg-textSecondary">${escapeHtml(status)} · ${escapeHtml(item.stage || '—')}</span>${reason}
+            <span class="shrink-0 text-tg-textSecondary">${escapeHtml(status)} · ${escapeHtml(stage)}</span>${reason}
             ${destinationsDetail ? `<span class="text-tg-textSecondary">${escapeHtml(destinationsDetail)}</span>` : ''}${retry}
         </div>`;
     }).join('');
