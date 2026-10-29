@@ -691,9 +691,6 @@ func normalizedAutoForward(existing, value any) (map[string]any, error) {
 		}
 		routes = append(routes, route)
 	}
-	if out["enabled"] == true && hasRoutes && len(routes) == 0 {
-		return nil, errors.New("auto-forward requires at least one destination route")
-	}
 	seenRoutes := make(map[string]struct{}, len(routes))
 	for _, raw := range routes {
 		route := raw.(map[string]any)

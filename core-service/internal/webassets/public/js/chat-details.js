@@ -396,6 +396,7 @@ function forwardRouteHtml(route = {}, index = 0) {
     const sourceID = `fwd-source-topic-${suffix}`;
     const destinationID = `fwd-destination-group-${suffix}`;
     const destinationTopicID = `fwd-destination-topic-${suffix}`;
+    const destinationGroupId = route.destinationGroupId ?? 'storage';
     const captions = Object.fromEntries(['captionMode', 'captionModeOverride', 'caption', 'regexPattern', 'regexReplacement']
         .filter((key) => key in route).map((key) => [key, route[key]]));
     return `<fieldset class="cd-forward-route" data-forward-route data-caption-settings="${escapeHtml(JSON.stringify(captions))}">
@@ -408,7 +409,7 @@ function forwardRouteHtml(route = {}, index = 0) {
         </select></div></div>
         <div class="cd-route-field"><label class="cd-label" for="${destinationID}-trigger">${escapeHtml(i18nT('group.fwd.destination_group', 'Destination group'))}</label>
         <div class="cd-search-select" data-search-select><button id="${destinationID}-trigger" type="button" class="tg-input cd-input cd-select-trigger" data-select-trigger aria-haspopup="listbox" aria-expanded="false"><span data-select-value></span><i class="ri-arrow-down-s-line" aria-hidden="true"></i></button><div class="cd-select-menu hidden" data-select-menu><input id="${destinationID}-search" class="tg-input cd-input cd-option-search" type="search" data-option-search data-option-search-empty="${escapeHtml(i18nT('group.fwd.no_search_results', 'No matching options.'))}" placeholder="${escapeHtml(i18nT('group.fwd.search_groups', 'Search groups…'))}" aria-label="${escapeHtml(i18nT('group.fwd.search_groups', 'Search groups…'))}" autocomplete="off"><div class="cd-select-options" data-select-options role="listbox"></div></div>
-        <select id="${destinationID}" class="cd-native-select" data-route-destination data-selected="${escapeHtml(String(route.destinationGroupId || ''))}" tabindex="-1" aria-hidden="true">${forwardGroupOptions(route.destinationGroupId)}</select></div></div>
+        <select id="${destinationID}" class="cd-native-select" data-route-destination data-selected="${escapeHtml(String(destinationGroupId))}" tabindex="-1" aria-hidden="true">${forwardGroupOptions(destinationGroupId)}</select></div></div>
         <div class="cd-route-field hidden" data-route-destination-topic-wrap><label class="cd-label" for="${destinationTopicID}-trigger">${escapeHtml(i18nT('group.fwd.destination_topic', 'Destination topic'))}</label>
         <div class="cd-search-select" data-search-select><button id="${destinationTopicID}-trigger" type="button" class="tg-input cd-input cd-select-trigger" data-select-trigger aria-haspopup="listbox" aria-expanded="false"><span data-select-value></span><i class="ri-arrow-down-s-line" aria-hidden="true"></i></button><div class="cd-select-menu hidden" data-select-menu><input id="${destinationTopicID}-search" class="tg-input cd-input cd-option-search" type="search" data-option-search data-option-search-empty="${escapeHtml(i18nT('group.fwd.no_search_results', 'No matching options.'))}" placeholder="${escapeHtml(i18nT('group.fwd.search_topics', 'Search topics…'))}" aria-label="${escapeHtml(i18nT('group.fwd.search_destination_topics', 'Search destination topics'))}" autocomplete="off"><div class="cd-select-options" data-select-options role="listbox"></div></div>
         <select id="${destinationTopicID}" class="cd-native-select" data-route-destination-topic data-selected="${escapeHtml(String(route.destinationTopicId || 0))}" tabindex="-1" aria-hidden="true" disabled>
@@ -585,6 +586,8 @@ function refreshSourceTopicOptions() {
 function updateRouteWildcardState() {
     const routes = [...document.querySelectorAll('[data-forward-route]')];
     for (const card of routes) {
+        const remove = card.querySelector('[data-route-remove]');
+        if (remove) remove.disabled = routes.length <= 1;
         const source = card.querySelector('[data-route-source-topic]');
         const destination = card.querySelector('[data-route-destination]');
         const sourceID = Number(source?.value) || 0;
@@ -722,7 +725,7 @@ function render() {
     if (!forwardRoutes.length && !Array.isArray(fwd.routes) && fwd.enabled === true) {
         forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: 'storage' });
     }
-    if (!forwardRoutes.length) forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: '' });
+    if (!forwardRoutes.length) forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: 'storage' });
     const forwardingConfigured = forwardRoutes.length > 0 && forwardRoutes.every((route) => String(route.destinationGroupId || '').trim());
     const forwardingEnabled = fwd.enabled === true;
     const topicRule = g?.topics || {};

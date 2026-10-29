@@ -38,13 +38,16 @@ func TestForumRouteValidation(t *testing.T) {
 	})
 }
 
-func TestEnabledForwardRoutesRequireDestination(t *testing.T) {
-	_, err := normalizedAutoForward(nil, map[string]any{
+func TestEnabledForwardingCanBeSavedBeforeRoutesAreChosen(t *testing.T) {
+	got, err := normalizedAutoForward(nil, map[string]any{
 		"enabled": true,
 		"routes":  []any{map[string]any{"sourceTopicId": float64(0), "destinationGroupId": ""}},
 	})
-	if err == nil {
-		t.Fatal("enabled forwarding accepted a route without a destination")
+	if err != nil {
+		t.Fatalf("enabled forwarding should save while routes are being configured: %v", err)
+	}
+	if got["enabled"] != true || len(got["routes"].([]any)) != 0 {
+		t.Fatalf("enabled forwarding without a destination should remain enabled and unrouted: %#v", got)
 	}
 	if _, err := normalizedAutoForward(nil, map[string]any{
 		"enabled": true,

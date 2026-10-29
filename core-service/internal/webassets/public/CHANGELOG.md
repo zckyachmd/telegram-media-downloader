@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.19] — 2026-10-29
+
+### Changed
+- Forward protection now lives under Advanced → Forwarder; new group routes default to All → Telegram Downloader Storage, and forwarding can be enabled before route setup is complete.
+- The last forwarding route cannot be removed, and backfill wording now states that it runs in the background.
+- Browser asset and service-worker versions advance so existing tabs fetch the updated settings UI.
+
 ## [3.4.18] — 2026-10-29
 
 ### Fixed

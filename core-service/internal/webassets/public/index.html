@@ -864,12 +864,6 @@
                         <p id="engine-error" class="engine-error hidden"></p>
                     </section>
 
-                    <section class="bg-tg-panel rounded-xl p-4 mb-6" data-admin-only aria-labelledby="settings-forward-protection-title">
-                        <h3 id="settings-forward-protection-title" class="text-tg-text text-sm font-semibold mb-2" data-i18n="settings.forward.protection">Forward protection</h3>
-                        <label class="cd-topic-option"><input id="setting-forward-protect-default" type="checkbox" class="cd-checkbox-input"><span class="cd-checkbox-control" aria-hidden="true"><i class="ri-check-line"></i></span><span class="cd-topic-name" data-i18n="settings.forward.protect_default">Protect forwarded copies by default</span></label>
-                        <p class="text-xs text-tg-textSecondary mt-2" data-i18n="settings.forward.protection_help">Protected copies are downloaded and uploaded. Groups can override this default.</p>
-                    </section>
-
                     <!-- Tools — what used to be the Maintenance hub. What needs
                          attention first, then the four groups; each group page
                          has a card per tool (js/tools-hub.js). #/settings/tools
@@ -935,6 +929,11 @@
 
                             <div class="border-t border-tg-border/50 pt-4">
                                 <h4 class="text-tg-text text-sm font-medium mb-2" data-i18n="settings.advanced.forwarder">Forwarder</h4>
+                                <section class="mb-4" aria-labelledby="settings-forward-protection-title">
+                                    <h5 id="settings-forward-protection-title" class="text-tg-text text-xs font-medium mb-2" data-i18n="settings.forward.protection">Forward protection</h5>
+                                    <label class="cd-topic-option"><input id="setting-forward-protect-default" type="checkbox" class="cd-checkbox-input"><span class="cd-checkbox-control" aria-hidden="true"><i class="ri-check-line"></i></span><span class="cd-topic-name" data-i18n="settings.forward.protect_default">Protect forwarded copies by default</span></label>
+                                    <p class="text-xs text-tg-textSecondary mt-2" data-i18n="settings.forward.protection_help">Protected copies are downloaded and uploaded. Groups can override this default.</p>
+                                </section>
                                 <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                                     <div>
                                         <label for="setting-adv-forward-concurrency" class="text-tg-text text-xs block mb-1" data-i18n="settings.advanced.forward_concurrency">Concurrent forwards</label>

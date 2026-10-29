@@ -6999,6 +6999,14 @@ body:not(.in-chat) [data-chat-only] {
     color: #fff;
     border-color: var(--tg-red);
 }
+.cd-route-remove:disabled,
+.cd-route-remove:disabled:hover {
+    background: rgba(235, 87, 87, 0.08);
+    color: var(--tg-red);
+    border-color: rgba(235, 87, 87, 0.18);
+    opacity: 0.45;
+    cursor: not-allowed;
+}
 .cd-route-empty,
 .cd-legacy-destination {
     margin: 0;
