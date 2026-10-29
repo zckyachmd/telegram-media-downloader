@@ -48,7 +48,7 @@ const FILTERS = [
         icon: 'ri-file-line',
         label: () => i18nT('group.filter.files', 'Files / Documents'),
     },
-    { key: 'links', icon: 'ri-link', label: () => i18nT('group.filter.links', 'Links') },
+    { key: 'audio', icon: 'ri-music-line', label: () => i18nT('group.filter.audio', 'Audio / Music') },
     {
         key: 'voice',
         icon: 'ri-mic-line',
@@ -60,7 +60,6 @@ const FILTERS = [
         icon: 'ri-emoji-sticker-line',
         label: () => i18nT('group.filter.stickers', 'Stickers'),
     },
-    { key: 'urls', icon: 'ri-links-line', label: () => i18nT('group.filter.urls', 'URLs in Text') },
 ];
 
 // Rescue mode per chat: follow the global setting, or force on / off.
@@ -483,7 +482,7 @@ async function loadTopicOptions(select, groupID, emptyLabel, disableClosed = fal
         let request = forumTopicsCache.get(groupID);
         if (!request) {
             request = api
-                .get(`/api/dialogs/${encodeURIComponent(groupID)}/topics`)
+                .get(`/api/dialogs/${encodeURIComponent(groupID)}/topics`, { timeoutMs: 130_000 })
                 .then((result) => (Array.isArray(result?.topics) ? result.topics : []))
                 .catch((error) => {
                     forumTopicsCache.delete(groupID);
@@ -523,7 +522,7 @@ async function loadTopicOptions(select, groupID, emptyLabel, disableClosed = fal
         wrapper?.classList.remove('hidden');
         cacheSearchOptions(select);
         const status = select.closest('[data-forward-route]')?.querySelector('[data-route-topics-status]');
-        if (status) status.textContent = error?.data?.message || error?.data?.error || i18nT('group.fwd.topics_error', 'Connect a Telegram account to load topic names.');
+        if (status) status.textContent = error?.data?.message || error?.data?.error || i18nT('group.fwd.topics_error', 'Could not load topic names. Check the Telegram connection and try again.');
     }
 }
 
@@ -665,43 +664,25 @@ function updateTopicFilterCount() {
     const selected = list ? list.querySelectorAll('[data-topic-filter-id]:checked').length : 0;
     const counter = document.querySelector('[data-topic-counter]');
     if (counter) {
-        counter.textContent = total > 0 ? `${selected} / ${total} selected` : '0 selected';
+        counter.textContent = i18nTf(
+            'group.topics.count',
+            { selected, total },
+            `${selected} of ${total} topics selected`,
+        );
     }
 }
 
-async function loadGroupTopicFilterOptions() {
-    const list = document.getElementById('topics-list');
-    if (!list || !cur?.id) return;
-    const selected = new Set((cur.group?.topics?.ids || []).map(String));
-    list.innerHTML = `<span class="cd-help">${escapeHtml(i18nT('group.fwd.topics_loading', 'Loading topics…'))}</span>`;
-    try {
-        let request = forumTopicsCache.get(cur.id);
-        if (!request) {
-            request = api.get(`/api/dialogs/${encodeURIComponent(cur.id)}/topics`)
-                .then((result) => (Array.isArray(result?.topics) ? result.topics : []))
-                .catch((error) => { forumTopicsCache.delete(cur.id); throw error; });
-            forumTopicsCache.set(cur.id, request);
-        }
-        const topics = await request;
-        if (!list.isConnected) return;
-        list.dataset.loaded = 'true';
-        if (!topics.length) {
-            list.innerHTML = `<span class="cd-help">${escapeHtml(i18nT('group.fwd.no_topics', 'This group has no forum topics.'))}</span>`;
-            updateTopicFilterCount();
-            return;
-        }
-        list.innerHTML = topics.map((topic) => `
-            <label class="cd-topic-option">
-                <input type="checkbox" class="cd-checkbox-input" data-topic-filter-id value="${escapeHtml(String(topic.id))}" ${selected.has(String(topic.id)) ? 'checked' : ''}>
-                <span class="cd-checkbox-control" aria-hidden="true"><i class="ri-check-line"></i></span>
-                <span class="cd-topic-name">${escapeHtml(topic.name)}</span>
-                ${topic.closed ? `<span class="cd-topic-badge">${escapeHtml(i18nT('group.fwd.closed', 'closed'))}</span>` : ''}
-            </label>`).join('');
-        updateTopicFilterCount();
-        renderTopicProtection(topics);
-    } catch (error) {
-        if (list.isConnected) list.innerHTML = `<span class="cd-help" role="status">${escapeHtml(error?.data?.message || error?.data?.error || i18nT('group.fwd.topics_error', 'Connect a Telegram account to load topic names.'))}</span>`;
+export function preloadGroupTopics(groupId) {
+    const id = String(groupId || '');
+    if (!id) return Promise.resolve([]);
+    let request = forumTopicsCache.get(id);
+    if (!request) {
+        request = api.get(`/api/dialogs/${encodeURIComponent(id)}/topics`, { timeoutMs: 130_000 })
+            .then((result) => (Array.isArray(result?.topics) ? result.topics : []))
+            .catch((error) => { forumTopicsCache.delete(id); throw error; });
+        forumTopicsCache.set(id, request);
     }
+    return request;
 }
 
 function collectForwardRoutes() {
@@ -744,7 +725,9 @@ function render() {
     if (!forwardRoutes.length) forwardRoutes.push({ sourceTopicId: 0, destinationGroupId: '' });
     const forwardingConfigured = forwardRoutes.length > 0 && forwardRoutes.every((route) => String(route.destinationGroupId || '').trim());
     const forwardingEnabled = fwd.enabled === true;
-    const topics = g?.topics || {};
+    const topicRule = g?.topics || {};
+    const forumTopics = Array.isArray(cur.forumTopics) ? cur.forumTopics : [];
+    const selectedTopics = new Set((topicRule.ids || []).map(String));
     const filters = filtersNow();
     const rescue = ['on', 'off', 'auto'].includes(g?.rescueMode) ? g.rescueMode : 'auto';
     const suspended = g?.suspended === true;
@@ -801,6 +784,7 @@ function render() {
 
         <section class="cd-section" aria-labelledby="cd-h-download">
             <h3 id="cd-h-download" class="cd-heading">${escapeHtml(i18nT('chat.section.download', 'What to download'))}</h3>
+            <p class="cd-help">${escapeHtml(i18nT('chat.section.download_help', 'Choose which new messages are processed. These filters apply to both downloads and auto-forward.'))}</p>
             <div class="cd-card">
                 <div id="filter-options" class="cd-chips" role="group" aria-labelledby="cd-h-download">
                     ${FILTERS.map(
@@ -812,24 +796,19 @@ function render() {
                         </button>`,
                     ).join('')}
                 </div>
-                <details class="cd-more" ${topics.enabled ? 'open' : ''}>
-                    <summary class="cd-more-summary">
-                        <span>${escapeHtml(i18nT('chat.more', 'More'))}</span>
-                        <span class="cd-more-hint">${escapeHtml(i18nT('group.topics.title', 'Forum-topic filter'))}</span>
-                        <i class="ri-arrow-down-s-line cd-more-chevron" aria-hidden="true"></i>
-                    </summary>
-                    <div class="cd-more-body">
+                ${forumTopics.length ? `
+                    <section class="cd-topic-section cd-more" aria-labelledby="cd-topics-title">
+                        <div class="cd-more-body">
+                        <h4 id="cd-topics-title" class="cd-subheading">${escapeHtml(i18nT('chat.more', 'Forum topics'))}</h4>
                         ${switchRow({
                             id: 'topics-enable-toggle',
-                            label: i18nT('group.topics.title', 'Forum-topic filter'),
-                            sub: i18nT(
-                                'chat.topics.sub',
-                                'Forum groups only: download from some topics',
-                            ),
-                            on: topics.enabled === true,
+                            label: i18nT('group.topics.title', 'Limit by forum topic'),
+                            sub: i18nT('chat.topics.sub', 'In forum groups, limit processing to selected topics.'),
+                            on: topicRule.enabled === true,
                         })}
+                        <div id="topics-settings" class="${topicRule.enabled === true ? '' : 'hidden'}">
                         <div class="cd-route-field">
-                            <label class="cd-label" for="topics-mode-trigger">${escapeHtml(i18nT('group.topics.mode', 'Topics to process'))}</label>
+                            <label class="cd-label" for="topics-mode-trigger">${escapeHtml(i18nT('group.topics.mode', 'Selected topic rule'))}</label>
                             <div class="cd-search-select" data-search-select>
                                 <button id="topics-mode-trigger" type="button" class="tg-input cd-input cd-select-trigger" data-select-trigger aria-haspopup="listbox" aria-expanded="false">
                                     <span data-select-value></span>
@@ -838,9 +817,9 @@ function render() {
                                 <div class="cd-select-menu hidden" data-select-menu data-no-search>
                                     <div class="cd-select-options" data-select-options role="listbox"></div>
                                 </div>
-                                <select id="topics-mode" class="cd-native-select" data-selected="${topics.mode === 'blacklist' ? 'blacklist' : 'whitelist'}" tabindex="-1" aria-hidden="true">
-                                    <option value="whitelist" ${topics.mode !== 'blacklist' ? 'selected' : ''}>${escapeHtml(i18nT('group.topics.process_selected', 'Process selected topics only'))}</option>
-                                    <option value="blacklist" ${topics.mode === 'blacklist' ? 'selected' : ''}>${escapeHtml(i18nT('group.topics.ignore_selected', 'Ignore selected topics'))}</option>
+                                <select id="topics-mode" class="cd-native-select" data-selected="${topicRule.mode === 'blacklist' ? 'blacklist' : 'whitelist'}" tabindex="-1" aria-hidden="true">
+                                    <option value="whitelist" ${topicRule.mode !== 'blacklist' ? 'selected' : ''}>${escapeHtml(i18nT('group.topics.process_selected', 'Include selected topics'))}</option>
+                                    <option value="blacklist" ${topicRule.mode === 'blacklist' ? 'selected' : ''}>${escapeHtml(i18nT('group.topics.ignore_selected', 'Exclude selected topics'))}</option>
                                 </select>
                             </div>
                         </div>
@@ -851,15 +830,26 @@ function render() {
                                 <button type="button" class="cd-pill-btn" data-topics-clear-all>${escapeHtml(i18nT('common.clear_all', 'Clear'))}</button>
                             </div>
                         </div>
-                        <div id="topics-list" class="cd-topic-list" role="group" aria-labelledby="topics-mode-trigger"></div>
-                        <p id="cd-topics-help" class="cd-help">${escapeHtml(i18nT('group.topics.note', 'With no topics selected, all topics are processed. Turn this filter off to process every topic.'))}</p>
-                    </div>
-                </details>
+                        <div id="topics-list" class="cd-topic-list" role="group" aria-labelledby="topics-mode-trigger">
+                            ${forumTopics.map((topic) => `
+                                <label class="cd-topic-option">
+                                    <input type="checkbox" class="cd-checkbox-input" data-topic-filter-id value="${escapeHtml(String(topic.id))}" ${selectedTopics.has(String(topic.id)) ? 'checked' : ''}>
+                                    <span class="cd-checkbox-control" aria-hidden="true"><i class="ri-check-line"></i></span>
+                                    <span class="cd-topic-name">${escapeHtml(topic.name)}</span>
+                                    ${topic.closed ? `<span class="cd-topic-badge">${escapeHtml(i18nT('group.fwd.closed', 'closed'))}</span>` : ''}
+                                </label>`).join('')}
+                        </div>
+                        <p id="cd-topics-help" class="cd-help">${escapeHtml(i18nT('group.topics.note', 'No topics selected means all topics. This filter decides which messages reach download and auto-forward; Forward to routes choose their destinations.'))}</p>
+                        </div>
+                        </div>
+                    </section>` : cur.topicsUnavailable ? `
+                        <p class="cd-help" role="status">${escapeHtml(i18nT('group.fwd.topics_error', "Topic names are unavailable. Saved topic rules still apply, but you can't edit them now."))}</p>` : ''}
             </div>
         </section>
 
         <section class="cd-section" aria-labelledby="cd-h-forward">
             <h3 id="cd-h-forward" class="cd-heading">${escapeHtml(i18nT('chat.section.forward', 'Forward to'))}</h3>
+            <p class="cd-help">${escapeHtml(i18nT('chat.section.forward_help', 'Choose destinations for messages allowed by the content filters above.'))}</p>
             <div class="cd-card">
                 ${switchRow({
                     id: 'fwd-enable-toggle',
@@ -895,8 +885,8 @@ function render() {
                     })}
                     ${fwd.deleteAfterForward === true ? switchRow({
                         id: 'fwd-direct-toggle',
-                        label: i18nT('group.fwd.direct', 'Forward without downloading'),
-                        sub: i18nT('group.fwd.direct_help', 'The media will not be saved to the local library.'),
+                        label: i18nT('group.fwd.direct', 'Try direct forward first'),
+                        sub: i18nT('group.fwd.direct_help', 'Protection requires download and upload. Otherwise, Telegram forwarding is tried first; if blocked, download and upload are used. The local file is removed after successful delivery.'),
                         on: fwd.directForward !== false,
                     }) : ''}
                     ${globalCaptionFields(fwd)}
@@ -983,8 +973,12 @@ function render() {
             </div>
         </section>`;
     initAllSearchSelects(el);
+    const topicsList = document.getElementById('topics-list');
+    if (topicsList) {
+        topicsList.dataset.loaded = 'true';
+        updateTopicFilterCount();
+    }
     if (forwardRoutes.length) void loadForwardRouteOptions();
-    if (cur.id) void loadGroupTopicFilterOptions();
 }
 
 function initAllSearchSelects(scope = document) {
@@ -1263,15 +1257,28 @@ async function flush() {
                 setSwitch('group-enable-toggle', monitoringNow(), monitorSub());
             }
             const savedForward = group?.autoForward || {};
-            if (savedForward.enabled !== true && document.getElementById('fwd-enable-toggle')?.getAttribute('aria-checked') === 'true') {
-                setSwitch('fwd-enable-toggle', false);
-                document.getElementById('fwd-settings')?.classList.remove('hidden');
-                document.querySelector('[data-forward-route-required]')?.classList.remove('hidden');
+            if (typeof body.autoForward?.enabled === 'boolean') {
+                const savedEnabled = savedForward.enabled === true;
+                setSwitch('fwd-enable-toggle', savedEnabled);
+                document.getElementById('fwd-settings')?.classList.toggle('hidden', !savedEnabled);
+                if (body.autoForward.enabled && !savedEnabled) {
+                    document.querySelector('[data-forward-route-required]')?.classList.remove('hidden');
+                }
             }
         }
     } catch (e) {
         if (cur === target) {
             pending = mergePatch(body, pending);
+            if (typeof body.autoForward?.enabled === 'boolean') {
+                const savedEnabled = target.group?.autoForward?.enabled === true;
+                setSwitch('fwd-enable-toggle', savedEnabled);
+                document.getElementById('fwd-settings')?.classList.toggle('hidden', !savedEnabled);
+            }
+            if ((e?.data?.error || e?.data?.message) === 'auto-forward requires at least one destination route') {
+                setSwitch('fwd-enable-toggle', false);
+                document.getElementById('fwd-settings')?.classList.remove('hidden');
+                document.querySelector('[data-forward-route-required]')?.classList.remove('hidden');
+            }
             const msg =
                 e?.data?.code === 'GROUP_SUSPENDED'
                     ? i18nT('groups.status.suspended', 'Suspended')
@@ -1636,27 +1643,11 @@ function onClick(e) {
                     : i18nT('chat.monitor.sub_off', 'Off — new posts are not downloaded');
             }
         } else if (sw.id === 'fwd-enable-toggle') {
-            if (on) {
-                const routeCount = document.querySelectorAll('[data-forward-route]').length;
-                if (!routeCount) appendForwardRoute();
-                const destinations = [...document.querySelectorAll('[data-route-destination]')].map((select) => select.value.trim());
-                if (!destinations.length || destinations.some((destination) => !destination)) {
-                    setSwitch(sw.id, true);
-                    document.getElementById('fwd-settings')?.classList.remove('hidden');
-                    document.querySelector('[data-route-destination]')?.closest('[data-search-select]')?.querySelector('[data-select-trigger]')?.focus();
-                    document.querySelector('[data-forward-route-required]')?.classList.remove('hidden');
-                    return;
-                }
-            } else {
-                setSwitch(sw.id, false);
-                document.getElementById('fwd-settings')?.classList.add('hidden');
-                queueSave({ autoForward: { enabled: false } });
-                return;
-            }
             setSwitch(sw.id, on);
             document.getElementById('fwd-settings')?.classList.toggle('hidden', !on);
-            queueSave({ autoForward: { enabled: true } });
+            queueSave({ autoForward: { enabled: on } });
         } else if (sw.id === 'fwd-delete-toggle') {
+            setSwitch(sw.id, on);
             const autoForward = { deleteAfterForward: on };
             if (!on) autoForward.directForward = false;
             queueSave({ autoForward });
@@ -1667,8 +1658,8 @@ function onClick(e) {
                 const template = document.createElement('template');
                 template.innerHTML = switchRow({
                     id: 'fwd-direct-toggle',
-                    label: i18nT('group.fwd.direct', 'Forward without downloading'),
-                    sub: i18nT('group.fwd.direct_help', 'The media will not be saved to the local library.'),
+                    label: i18nT('group.fwd.direct', 'Try direct forward first'),
+                    sub: i18nT('group.fwd.direct_help', 'Protection requires download and upload. Otherwise, Telegram forwarding is tried first; if blocked, download and upload are used. The local file is removed after successful delivery.'),
                     on: cur.group.autoForward.directForward !== false,
                 });
                 document.getElementById('fwd-delete-toggle')?.after(template.content.firstElementChild);
@@ -1681,6 +1672,7 @@ function onClick(e) {
             queueSave({ autoForward: { protect: on } });
         } else if (sw.id === 'topics-enable-toggle') {
             setSwitch(sw.id, on);
+            document.getElementById('topics-settings')?.classList.toggle('hidden', !on);
             const rule = topicsPatch().topics;
             if (cur.group) cur.group.topics = { ...(cur.group.topics || {}), ...rule };
             const refresh = refreshSourceTopicOptions();
@@ -1947,7 +1939,7 @@ let tokenSeq = 0;
  * the router came from (null for a deep link / reload) — kept on the
  * history entry so Back steps back to it instead of stacking a new one.
  */
-export function showChatDetails({ groupId, from = null, fromGroup = null, onName = null }) {
+export function showChatDetails({ groupId, from = null, fromGroup = null, onName = null, forumTopics = [], topicsUnavailable = false }) {
     const el = root();
     if (!el) return;
     const id = String(groupId);
@@ -1990,6 +1982,8 @@ export function showChatDetails({ groupId, from = null, fromGroup = null, onName
     cur = {
         id,
         token: ++tokenSeq,
+        forumTopics,
+        topicsUnavailable,
         group: group ? { ...group, filters: { ...(group.filters || {}) } } : null,
         draftFilters: { ...NEW_CHAT_FILTERS },
         name: getGroupName(id, { fallback: findDialog(id)?.name }),

@@ -575,6 +575,11 @@ func forwardSettings(cfg map[string]any, groupID string) (settings map[string]an
 	return nil, "", false
 }
 
+func autoForwardEnabled(cfg map[string]any, groupID string) bool {
+	_, _, enabled := forwardSettings(cfg, groupID)
+	return enabled
+}
+
 func forwardRoutingSignature(settings map[string]any) string {
 	var routes []string
 	if raw, ok := settings["routes"].([]any); ok {
@@ -783,15 +788,23 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 		_, _ = a.db.Writer.ExecContext(context.WithoutCancel(ctx), `UPDATE tgdl_processing_attempts SET forward_status='processing',local_delete_status=CASE WHEN local_delete_status='pending' THEN 'pending' ELSE 'not_requested' END WHERE id=?`, job.historyID)
 		a.notifyProcessingHistory()
 	}
-	globalConfig, _ := a.config.Load(ctx)
-	groupSettings, accountID := job.settings, job.accountID
-	if groupSettings == nil {
-		cfg, err := a.config.Load(ctx)
-		if err != nil {
-			a.forwardFailed(job, "", err)
+	globalConfig, err := a.config.Load(ctx)
+	if err != nil {
+		a.forwardFailed(job, "", err)
+		return
+	}
+	// Queued automatic jobs carry a settings snapshot. The live toggle still
+	// gates them; explicit manual forwards use stage "available".
+	if job.stage != "available" {
+		_, _, enabled := forwardSettings(globalConfig, job.groupID)
+		if !enabled {
+			status = "not_applicable"
 			return
 		}
-		groupSettings, accountID, _ = forwardSettings(cfg, job.groupID)
+	}
+	groupSettings, accountID := job.settings, job.accountID
+	if groupSettings == nil {
+		groupSettings, accountID, _ = forwardSettings(globalConfig, job.groupID)
 	}
 	enabled := groupSettings["enabled"] == true
 	if !enabled {
@@ -949,7 +962,7 @@ func (a *App) forwardToRoute(ctx context.Context, job forwardJob, accountID stri
 		}
 		destWasBlocked = blocked
 	}
-	if !customCaption(settings) && settings["protect"] != true && job.messageID > 0 && a.forwarder != nil {
+	if job.path == "" && !customCaption(settings) && settings["protect"] != true && job.messageID > 0 && a.forwarder != nil {
 		sender, ok := a.forwarder.(nativeForwardSender)
 		if !ok {
 			a.forwardFailed(job, destination, errors.New("native Telegram forwarding is unavailable"))

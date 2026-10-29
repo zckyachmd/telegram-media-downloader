@@ -85,6 +85,26 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 					return record, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, downloadErr)
 				}
 				job.path, job.recordID = record.Path, record.ID
+				latestConfig, configErr := a.config.Load(ctx)
+				if configErr != nil {
+					a.updateForwardReservation(ctx, job, "failed", configErr.Error())
+					a.failProcessingForward(context.WithoutCancel(ctx), attemptID, configErr)
+					return record, configErr
+				}
+				if !autoForwardEnabled(latestConfig, item.GroupID) {
+					if err := a.finishProcessingAttempt(ctx, attemptID, "downloaded", "", record.SHA256, "not_applicable"); err != nil {
+						return record, err
+					}
+					job.stage = "complete"
+					a.updateForwardReservation(ctx, job, "not_applicable", "")
+					return record, nil
+				}
+				lastPending := -1
+				for i := range job.destinations {
+					if job.destinations[i].Status != "forwarded" {
+						lastPending = i
+					}
+				}
 				for i := range job.destinations {
 					if job.destinations[i].Status == "forwarded" {
 						continue
@@ -94,7 +114,8 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 						settings = cloneMap(settings)
 						settings["captionMode"] = "source_info"
 					}
-					if !a.forwardToRoute(ctx, job, forwardAccountID, settings, false) {
+					deleteAfter := forwardSettings["deleteAfterForward"] == true && i == lastPending
+					if !a.forwardToRoute(ctx, job, forwardAccountID, settings, deleteAfter) {
 						err := errors.New("direct forward failed and upload fallback failed")
 						a.updateForwardReservation(ctx, job, "failed", err.Error())
 						a.failProcessingForward(context.WithoutCancel(ctx), attemptID, err)

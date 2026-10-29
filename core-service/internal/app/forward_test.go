@@ -195,6 +195,35 @@ func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
 	}
 }
 
+func TestDirectForwardFailureDownloadsThenUploads(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "captionMode": "native"})
+	var directCalls, downloads atomic.Int32
+	transport := mediaTransport(func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
+		downloads.Add(1)
+		_, err := w.Write([]byte("media"))
+		return err
+	})
+	_, err := a.ingestTelegramWithForward(ctx, docMessage(12, 123, 79, "source caption"), "", "Source", "acct1", transport, func(context.Context, telegram.ForwardMessageRequest) error {
+		directCalls.Add(1)
+		return errors.New("Telegram forbids native forwarding")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "fallback upload", func() bool { return len(fake.calls()) == 1 })
+	calls := fake.calls()
+	if directCalls.Load() != 1 || downloads.Load() != 1 {
+		t.Fatalf("direct attempts=%d downloads=%d", directCalls.Load(), downloads.Load())
+	}
+	if calls[0].body != "media" || calls[0].req.Protect {
+		t.Fatalf("fallback upload=%+v body=%q", calls[0].req, calls[0].body)
+	}
+	if _, exists := rowPath(t, a, "-1000000000123", 12); exists {
+		t.Fatal("fallback download was retained despite delete-after-forward")
+	}
+}
+
 func TestProtectedAutoForwardDownloadsAndUploadsProtectedCopy(t *testing.T) {
 	ctx := context.Background()
 	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "protect": true, "captionMode": "native"})
@@ -320,6 +349,60 @@ func TestAutoForwardSkipsWhenNotLiveDisabledOrAlreadyDownloaded(t *testing.T) {
 	// deleteAfterForward off: the download stays.
 	if _, ok := rowPath(t, a, "-1000000000123", 3); !ok {
 		t.Fatal("download removed without deleteAfterForward")
+	}
+}
+
+func TestQueuedAutoForwardStopsWhenDisabledAfterEnqueue(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": false, "destination": "me"})
+	a.forward(ctx, forwardJob{
+		groupID: "-1000000000123",
+		settings: map[string]any{
+			"enabled": true,
+			"routes":  []any{map[string]any{"sourceTopicId": float64(0), "destinationGroupId": "me"}},
+		},
+		stage: "metadata",
+	})
+	if calls := fake.calls(); len(calls) != 0 {
+		t.Fatalf("disabled auto-forward still sent %d messages", len(calls))
+	}
+}
+
+func TestAutoForwardDoesNotUploadFallbackAfterItIsDisabled(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{
+		"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "captionMode": "native",
+	})
+	transport := mediaTransport(func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
+		_, err := w.Write([]byte("media"))
+		return err
+	})
+	_, err := a.ingestTelegramWithForward(ctx, docMessage(21, 123, 87, ""), "", "Source", "acct1", transport, func(context.Context, telegram.ForwardMessageRequest) error {
+		a.configMu.Lock()
+		defer a.configMu.Unlock()
+		cfg, err := a.config.Load(ctx)
+		if err != nil {
+			return err
+		}
+		groups, _ := cfg["groups"].([]any)
+		group := groups[0].(map[string]any)
+		settings := group["autoForward"].(map[string]any)
+		settings["enabled"] = false
+		group["autoForward"] = settings
+		cfg["groups"] = groups
+		if err := a.config.Save(ctx, cfg); err != nil {
+			return err
+		}
+		return errors.New("native forwarding failed")
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := fake.calls(); len(calls) != 0 {
+		t.Fatalf("auto-forward uploaded after disable: %d uploads", len(calls))
+	}
+	if _, exists := rowPath(t, a, "-1000000000123", 21); !exists {
+		t.Fatal("source media should still be downloaded after native forwarding fails")
 	}
 }
 

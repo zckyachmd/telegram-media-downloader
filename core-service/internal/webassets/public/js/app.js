@@ -667,6 +667,15 @@ async function init() {
     // route waits for them. Stats (footer counters; may scan the disk on a
     // cold cache) don't shape the first page and no longer delay it.
     await loadGroups();
+    if (isAdmin) {
+        try {
+            const res = await api.get('/api/dialogs');
+            state.allDialogs = res?.dialogs || res || [];
+            state.dialogsAccounts = Array.isArray(res?.accounts) ? res.accounts : [];
+        } catch {
+            // The dashboard still opens if Telegram metadata is unavailable.
+        }
+    }
     loadStats();
 
     // Federated gallery scope (Layer 1, v2.12+) — boot one-shot. Reads
@@ -1037,11 +1046,22 @@ function renderPage(page, params = {}) {
         _setPageRaw('title', name);
         _setPageText('subtitle', 'chat.details.subtitle', 'Chat settings');
         updateHeaderAvatar(params.groupId, name);
+        const routeHash = location.hash;
         loadChatDetailsModule()
-            .then((m) => {
-                if (state.currentPage !== 'chat') return;
+            .then(async (m) => {
+                if (state.currentPage !== 'chat' || location.hash !== routeHash) return;
+                let forumTopics = [];
+                let topicsUnavailable = false;
+                try {
+                    forumTopics = await m.preloadGroupTopics(params.groupId);
+                } catch {
+                    topicsUnavailable = true;
+                }
+                if (state.currentPage !== 'chat' || location.hash !== routeHash) return;
                 m.showChatDetails({
                     ...params,
+                    forumTopics,
+                    topicsUnavailable,
                     // The page learned the chat's real name (not configured,
                     // nothing downloaded yet): put it in the header too.
                     onName: (n) => {

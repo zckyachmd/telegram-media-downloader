@@ -41,11 +41,14 @@ func (a *App) handleDialogTopics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer session.Close()
-	if _, err := session.List(-1); err != nil {
-		writeJSONError(w, http.StatusServiceUnavailable, "Telegram topics are unavailable")
-		return
-	}
 	topics, err := session.ForumTopics(ctx, r.PathValue("id"))
+	if err != nil {
+		// Existing dialog reads usually cache channel access hashes. Reload
+		// every dialog folder only when the cached topic lookup fails.
+		if _, listErr := session.List(-1); listErr == nil {
+			topics, err = session.ForumTopics(ctx, r.PathValue("id"))
+		}
+	}
 	if err != nil {
 		writeJSONError(w, http.StatusBadGateway, "Could not load forum topics: "+err.Error())
 		return
