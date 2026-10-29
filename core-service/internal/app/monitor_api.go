@@ -114,7 +114,9 @@ func (a *App) setAutoStart(ctx context.Context, value bool) error {
 	if err != nil {
 		return err
 	}
-	ensureMap(cfg, "monitor")["autoStart"] = value
+	monitor := ensureMap(cfg, "monitor")
+	monitor["autoStart"] = value
+	monitor["enginePaused"] = !value
 	return a.config.Save(ctx, cfg)
 }
 func (a *App) writeMonitorResult(w http.ResponseWriter, r *http.Request, err error) {
@@ -154,6 +156,7 @@ func (a *App) startMonitorDetached(r *http.Request, restart bool) error {
 		defer a.monitorOp.Unlock()
 		var err error
 		if restart {
+			a.pauseHistoryWorkers()
 			err = a.monitor.Stop(a.ctx)
 		}
 		if err == nil {
@@ -161,6 +164,9 @@ func (a *App) startMonitorDetached(r *http.Request, restart bool) error {
 		}
 		if err == nil {
 			err = a.setAutoStart(a.ctx, true)
+		}
+		if err == nil {
+			a.resumeHistoryWorkers()
 		}
 		done <- err
 	})
@@ -178,17 +184,24 @@ func (a *App) startMonitorDetached(r *http.Request, restart bool) error {
 	return nil
 }
 func (a *App) handleMonitorStop(w http.ResponseWriter, r *http.Request) {
+	// Gate backfill and queue restarts before stopping the shared engine. This
+	// makes Stop cover monitoring, queue downloads, and backfill enumeration.
+	a.pauseHistoryWorkers()
 	// Cancel first so an operator can stop an in-progress startup promptly.
-	err := a.monitor.StopObserving(r.Context())
+	err := a.monitor.Stop(r.Context())
 	a.monitorOp.Lock()
-	defer a.monitorOp.Unlock()
 	// A concurrent start may still have been preparing settings when the first
 	// cancellation ran. Serialize a second stop after that preparation finishes.
+	a.pauseHistoryWorkers()
 	if err == nil {
-		err = a.monitor.StopObserving(r.Context())
+		err = a.monitor.Stop(r.Context())
 	}
 	if err == nil {
 		err = a.setAutoStart(r.Context(), false)
+	}
+	a.monitorOp.Unlock()
+	if err == nil {
+		err = a.waitHistoryWorkers(r.Context())
 	}
 	a.writeMonitorResult(w, r, err)
 }

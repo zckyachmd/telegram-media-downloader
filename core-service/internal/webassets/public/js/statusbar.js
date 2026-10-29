@@ -13,11 +13,11 @@ function applyState(state) {
     const dot = $('status-dot');
     const lbl = $('status-state');
     const map = {
-        running: { color: 'bg-tg-green', text: i18nT('status.monitor_running', 'Monitor running') },
-        starting: { color: 'bg-tg-blue', text: i18nT('status.starting', 'Starting…') },
-        stopping: { color: 'bg-tg-orange', text: i18nT('status.stopping', 'Stopping…') },
-        stopped: { color: 'bg-gray-500', text: i18nT('status.idle', 'Idle') },
-        error: { color: 'bg-tg-red', text: i18nT('status.error', 'Error') },
+        running: { color: 'bg-tg-green', text: i18nT('status.monitor_running', 'Engine running') },
+        starting: { color: 'bg-tg-blue', text: i18nT('status.starting', 'Starting engine…') },
+        stopping: { color: 'bg-tg-orange', text: i18nT('status.stopping', 'Stopping all work…') },
+        stopped: { color: 'bg-gray-500', text: i18nT('status.idle', 'Engine stopped') },
+        error: { color: 'bg-tg-red', text: i18nT('status.error', 'Engine error') },
     };
     const m = map[state] || map.stopped;
     if (dot) dot.className = `w-2 h-2 rounded-full ${m.color}`;
@@ -37,7 +37,12 @@ function applyState(state) {
         if (pillLbl) pillLbl.textContent = m.text;
         pillEl.setAttribute(
             'aria-label',
-            i18nTf('header.engine_state', { state: m.text }, `Engine status: ${m.text}`),
+            i18nTf('header.engine_state', { state: m.text }, `Engine: ${m.text} · open controls`),
+        );
+        pillEl.title = i18nTf(
+            'header.engine_state',
+            { state: m.text },
+            `Engine: ${m.text} · open controls`,
         );
     }
 }

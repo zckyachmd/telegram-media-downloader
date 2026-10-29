@@ -66,6 +66,7 @@ type App struct {
 	historyJobs       map[string]*historyJob
 	historyCancel     map[string]context.CancelFunc
 	historyDrain      bool
+	enginePaused      bool // historyMu guards the global Engine pause gate.
 	ctx               context.Context
 	cancel            context.CancelFunc
 	bootWG            sync.WaitGroup
@@ -310,6 +311,14 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	registerPublicAPIRoutes(mux, a)
 
 	a.handler = a.transportPolicy(newCompressionPool(level).middleware(a.gateway(mux)))
+	stored, err := a.config.Load(ctx)
+	if err != nil {
+		a.Close()
+		return nil, err
+	}
+	a.historyMu.Lock()
+	a.enginePaused = objectAt(stored, "monitor")["enginePaused"] == true
+	a.historyMu.Unlock()
 	if err := a.recoverPurges(ctx); err != nil {
 		a.Close()
 		return nil, fmt.Errorf("recover purge jobs: %w", err)
@@ -317,11 +326,6 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	if err := a.recoverHistoryJobs(ctx); err != nil {
 		a.Close()
 		return nil, fmt.Errorf("recover history jobs: %w", err)
-	}
-	stored, err := a.config.Load(ctx)
-	if err != nil {
-		a.Close()
-		return nil, err
 	}
 	a.applyDownloadSpeed(stored)
 	a.backups, err = backup.NewManager(a.ctx, backup.Options{
@@ -343,6 +347,8 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			defer a.monitorOp.Unlock()
 			if err := a.startMonitor(a.ctx); err != nil && a.ctx.Err() == nil && a.output != nil {
 				fmt.Fprintf(a.output, "Monitor auto-start failed: %v\n", err)
+			} else if err == nil {
+				a.resumeHistoryWorkers()
 			}
 		}()
 	}

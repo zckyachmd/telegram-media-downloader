@@ -438,14 +438,14 @@
                             </button>
                         </div>
                     </div>
-                    <div class="hidden sm:flex items-center gap-1" role="group" data-i18n-aria-label="header.monitor_actions" aria-label="Monitor controls">
-                        <button id="monitor-start-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-green focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-green" data-monitor-action="start" data-admin-only data-i18n-title="header.monitor_start" title="Start monitor" aria-label="Start monitor">
+                    <div class="hidden sm:flex items-center gap-1" role="group" data-i18n-aria-label="header.monitor_actions" aria-label="Engine controls">
+                        <button id="monitor-start-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-green focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-green" data-monitor-action="start" data-admin-only data-i18n-title="header.monitor_start" title="Start engine" aria-label="Start engine">
                             <i class="ri-play-line text-xl" aria-hidden="true"></i>
                         </button>
-                        <button id="monitor-restart-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-blue focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-blue" data-monitor-action="restart" data-admin-only data-i18n-title="header.monitor_restart" title="Restart monitor" aria-label="Restart monitor">
+                        <button id="monitor-restart-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-blue focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-blue" data-monitor-action="restart" data-admin-only data-i18n-title="header.monitor_restart" title="Restart engine" aria-label="Restart engine">
                             <i class="ri-refresh-line text-xl" aria-hidden="true"></i>
                         </button>
-                        <button id="monitor-stop-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-red focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-red" data-monitor-action="stop" data-admin-only data-i18n-title="header.monitor_stop" title="Stop monitor" aria-label="Stop monitor">
+                        <button id="monitor-stop-btn" type="button" class="hidden w-10 h-10 min-w-[44px] min-h-[44px] rounded-full hover:bg-tg-hover items-center justify-center text-tg-red focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-tg-red" data-monitor-action="stop" data-admin-only data-i18n-title="header.monitor_stop" title="Stop all work" aria-label="Stop all work">
                             <i class="ri-stop-line text-xl" aria-hidden="true"></i>
                         </button>
                     </div>
@@ -490,15 +490,15 @@
                             <div class="border-t border-tg-border my-1" data-view-mode-only></div>
                             <button type="button" data-overflow="monitor-start" data-monitor-action="start" data-admin-only role="menuitem" class="hidden">
                                 <i class="ri-play-line"></i>
-                                <span class="vm-label" data-i18n="header.monitor_start">Start monitor</span>
+                                <span class="vm-label" data-i18n="header.monitor_start">Start engine</span>
                             </button>
                             <button type="button" data-overflow="monitor-restart" data-monitor-action="restart" data-admin-only role="menuitem" class="hidden">
                                 <i class="ri-refresh-line"></i>
-                                <span class="vm-label" data-i18n="header.monitor_restart">Restart monitor</span>
+                                <span class="vm-label" data-i18n="header.monitor_restart">Restart engine</span>
                             </button>
                             <button type="button" data-overflow="monitor-stop" data-monitor-action="stop" data-admin-only role="menuitem" class="hidden">
                                 <i class="ri-stop-line"></i>
-                                <span class="vm-label" data-i18n="header.monitor_stop">Stop monitor</span>
+                                <span class="vm-label" data-i18n="header.monitor_stop">Stop all work</span>
                             </button>
                         </div>
                     </div>
@@ -809,13 +809,15 @@
                             <div class="engine-title-group">
                                 <span id="engine-state-dot" class="engine-state-dot" data-state="stopped" aria-hidden="true"></span>
                                 <i class="ri-pulse-line text-tg-blue text-lg" aria-hidden="true"></i>
-                                <h3 class="engine-title" data-i18n="settings.engine.title">Realtime monitor</h3>
+                                <h3 class="engine-title" data-i18n="settings.engine.title">Download engine</h3>
                             </div>
                             <span id="engine-pill" class="engine-state-pill engine-state-stopped">
                                 <i class="ri-stop-circle-line"></i>
                                 <span data-i18n="settings.engine.stopped">Stopped</span>
                             </span>
                         </header>
+
+                        <p class="text-sm text-tg-textSecondary mt-2 mb-4" data-i18n="settings.engine.scope">Controls live monitoring, queued downloads, backfill, and forwarding together. Stop pauses active work; Start resumes pending work.</p>
 
                         <div class="engine-stats">
                             <div class="engine-stat-tile" data-stat="queue">
@@ -850,13 +852,13 @@
 
                         <div class="engine-actions">
                             <button type="button" id="engine-start" class="tg-btn-input inline-flex items-center gap-1.5">
-                                <i class="ri-play-fill"></i><span data-i18n="settings.engine.start">Start monitor</span>
+                                <i class="ri-play-fill"></i><span data-i18n="settings.engine.start">Start engine</span>
                             </button>
                             <button type="button" id="engine-stop" class="tg-btn-input-secondary hidden inline-flex items-center gap-1.5">
-                                <i class="ri-stop-fill"></i><span data-i18n="settings.engine.stop">Stop monitor</span>
+                                <i class="ri-stop-fill"></i><span data-i18n="settings.engine.stop">Stop all work</span>
                             </button>
                             <button type="button" id="engine-restart" class="tg-btn-input-secondary inline-flex items-center gap-1.5">
-                                <i class="ri-restart-line"></i><span data-i18n="settings.engine.restart">Restart</span>
+                                <i class="ri-restart-line"></i><span data-i18n="settings.engine.restart">Restart engine</span>
                             </button>
                             <a href="#/queue" class="engine-link" data-i18n="settings.engine.view_queue">View full queue →</a>
                         </div>

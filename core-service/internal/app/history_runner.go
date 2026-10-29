@@ -15,10 +15,12 @@ import (
 
 func (a *App) startHistoryWorker(id string) {
 	a.historyMu.Lock()
-	if a.historyCancel[id] != nil {
+	job := a.historyJobs[id]
+	if a.enginePaused || job == nil || job.State != "running" || job.Cancelled || a.historyCancel[id] != nil {
 		a.historyMu.Unlock()
 		return
 	}
+	job.enginePaused = false
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.historyCancel[id] = cancel
 	a.historyMu.Unlock()
@@ -28,13 +30,77 @@ func (a *App) startHistoryWorker(id string) {
 		a.finishHistory(id, err)
 		a.historyMu.Lock()
 		delete(a.historyCancel, id)
+		job := a.historyJobs[id]
+		resume := !a.enginePaused && job != nil && job.State == "running" && !job.Cancelled
 		a.historyMu.Unlock()
-		a.startHistoryDrain(false)
+		if resume {
+			a.startHistoryWorker(id)
+		} else {
+			a.startHistoryDrain(false)
+		}
 	}) {
 		cancel()
 		a.historyMu.Lock()
 		delete(a.historyCancel, id)
 		a.historyMu.Unlock()
+	}
+}
+
+func (a *App) engineWorkEnabled() bool {
+	a.historyMu.Lock()
+	defer a.historyMu.Unlock()
+	return !a.enginePaused
+}
+
+func (a *App) resumeHistoryWorkers() {
+	a.historyMu.Lock()
+	a.enginePaused = false
+	ids := make([]string, 0, len(a.historyJobs))
+	for id, job := range a.historyJobs {
+		if job.State == "running" && !job.Cancelled {
+			ids = append(ids, id)
+		}
+	}
+	a.historyMu.Unlock()
+	for _, id := range ids {
+		a.startHistoryWorker(id)
+	}
+	a.startHistoryDrain(false)
+}
+
+func (a *App) pauseHistoryWorkers() {
+	a.historyMu.Lock()
+	a.enginePaused = true
+	cancels := make([]context.CancelFunc, 0, len(a.historyCancel))
+	for _, job := range a.historyJobs {
+		if job.State == "running" && !job.Cancelled {
+			job.enginePaused = true
+		}
+	}
+	for _, cancel := range a.historyCancel {
+		cancels = append(cancels, cancel)
+	}
+	a.historyMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (a *App) waitHistoryWorkers(ctx context.Context) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		a.historyMu.Lock()
+		active := len(a.historyCancel)
+		a.historyMu.Unlock()
+		if active == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }
 
@@ -342,6 +408,11 @@ func (a *App) finishHistory(id string, cause error) {
 	if current == nil {
 		return
 	}
+	// Engine Stop is a pause: keep the durable running row and last committed
+	// cursor so Start can resume this job. User cancellation remains terminal.
+	if current.enginePaused && !current.Cancelled {
+		return
+	}
 	j := *current
 	now := time.Now().UnixMilli()
 	j.FinishedAt = &now
@@ -414,7 +485,7 @@ func (a *App) finishHistory(id string, cause error) {
 
 func (a *App) startHistoryDrain(restart bool) {
 	a.historyMu.Lock()
-	if a.historyDrain {
+	if a.enginePaused || a.historyDrain {
 		a.historyMu.Unlock()
 		return
 	}
@@ -435,12 +506,15 @@ func (a *App) startHistoryDrain(restart bool) {
 			if a.ctx.Err() != nil {
 				return
 			}
+			if !a.engineWorkEnabled() {
+				return
+			}
 			a.monitorOp.Lock()
 			// Purge/account changes hold monitorOp while deleting queued work.
 			// Read after acquiring it; an older snapshot can reopen accounts
 			// after a successful purge has removed the last manual job.
 			pending, err := a.monitor.PendingManual(a.ctx)
-			if err == nil && pending > 0 && (restart || a.monitor.RequireRunning() != nil) {
+			if err == nil && pending > 0 && a.engineWorkEnabled() && (restart || a.monitor.RequireRunning() != nil) {
 				err = a.startTelegramEngine(a.ctx, false)
 				restart = false
 			}

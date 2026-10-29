@@ -1601,21 +1601,13 @@ html.theme-light .notify-source-chip {
     background: rgba(0, 0, 0, 0.06);
 }
 
-/* Engine status pill: compact further on tiny screens (<400px) so
-   it doesn't push the bell + select-mode + overflow trio into
-   overflow-x scroll. Pill goes icon-only at 420px (existing rule
-   at line ~1166) — at 380px we also drop the dot's outer glow. */
+/* Keep a short, readable Engine state in the topbar on narrow screens. */
 @media (max-width: 380px) {
     .engine-status-pill {
-        padding: 0 4px;
-        min-width: 28px;
+        gap: 4px;
+        padding: 0 5px;
     }
-    #engine-status-pill {
-        font-size: 0;
-    }
-    /* Keep the queue-count badge legible after the parent pill collapses
-       its label to font-size: 0 — without this, an admin with 12 jobs
-       in flight saw an empty 8 px dot on a 320 px iPhone. */
+    /* Keep the queue-count badge readable beside the compact state label. */
     #engine-status-pill .nav-badge {
         font-size: 10px;
     }
@@ -2807,9 +2799,12 @@ input[type="range"].tg-range::-moz-range-track,
 }
 @media (max-width: 420px) {
     .engine-status-pill .engine-status-label {
-        display: none;
+        display: inline;
+        font-size: 10px;
+        white-space: nowrap;
     }
     .engine-status-pill {
+        gap: 4px;
         padding: 0 6px;
     }
 }

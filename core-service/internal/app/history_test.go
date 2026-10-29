@@ -234,6 +234,9 @@ func TestHistoryShutdownResumesCommittedCursorWithoutRequeue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer b.Close()
+	if rec := monitorRequest(t, b, "/api/monitor/start"); rec.Code != 200 {
+		t.Fatalf("resume engine: %d %s", rec.Code, rec.Body.String())
+	}
 	j := historyFinished(t, b, id)
 	if j.State != "done" || j.Processed != 2 || j.Downloaded != 2 {
 		t.Fatalf("resumed=%+v", j)
@@ -241,6 +244,83 @@ func TestHistoryShutdownResumesCommittedCursorWithoutRequeue(t *testing.T) {
 	waitHistoryDownloads(t, b, 2)
 	if resumed.Load() != 2 {
 		t.Fatalf("resumed pages=%d", resumed.Load())
+	}
+}
+
+func TestEngineStopPausesBackfillAndStartResumesCursor(t *testing.T) {
+	dir := t.TempDir()
+	entered := make(chan struct{}, 2)
+	stopped := make(chan struct{}, 1)
+	var pages atomic.Int64
+	page := func(ctx context.Context, r telegram.HistoryRequest) (telegram.HistoryPage, error) {
+		n := pages.Add(1)
+		switch n {
+		case 1:
+			return historyMessages(10), nil
+		case 2:
+			entered <- struct{}{}
+			<-ctx.Done()
+			stopped <- struct{}{}
+			return telegram.HistoryPage{}, ctx.Err()
+		case 3:
+			entered <- struct{}{}
+			return historyMessages(), nil
+		default:
+			return telegram.HistoryPage{}, fmt.Errorf("unexpected history page %d at offset %d", n, r.OffsetID)
+		}
+	}
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: dir, AccountFactory: historyFactory(t, page, nil, new(atomic.Int64))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	configureDisabledHistory(t, a)
+	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042","limit":0,"mode":"rescan"}`)
+	id := res["jobId"].(string)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("backfill did not reach the blocking page")
+	}
+	if r := monitorRequest(t, a, "/api/monitor/stop"); r.Code != 200 {
+		t.Fatalf("stop engine: %d %s", r.Code, r.Body.String())
+	}
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("engine stop did not cancel the active backfill request")
+	}
+	a.historyMu.Lock()
+	state := a.historyJobs[id].State
+	cursor := a.historyJobs[id].cursor
+	a.historyMu.Unlock()
+	if state != "running" || cursor != 10 {
+		t.Fatalf("paused job state=%q cursor=%d; want running at committed cursor 10", state, cursor)
+	}
+	if got := pages.Load(); got != 2 {
+		t.Fatalf("backfill issued %d pages after stop, want 2", got)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatal(err)
+	}
+	b, err := New(context.Background(), Config{DataDir: dir, AccountFactory: historyFactory(t, page, nil, new(atomic.Int64))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	time.Sleep(100 * time.Millisecond)
+	if got := pages.Load(); got != 2 {
+		t.Fatalf("persisted Engine Stop resumed backfill during startup: pages=%d", got)
+	}
+	if r := monitorRequest(t, b, "/api/monitor/start"); r.Code != 200 {
+		t.Fatalf("start engine: %d %s", r.Code, r.Body.String())
+	}
+	j := historyFinished(t, b, id)
+	if j.State != "done" || j.Processed != 1 {
+		t.Fatalf("resumed job=%+v", j)
+	}
+	if got := pages.Load(); got != 3 {
+		t.Fatalf("resumed with %d history pages, want 3", got)
 	}
 }
 

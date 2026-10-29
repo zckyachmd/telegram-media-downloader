@@ -21,25 +21,26 @@ import (
 )
 
 type historyJob struct {
-	ID          string  `json:"id"`
-	State       string  `json:"state"`
-	Processed   int     `json:"processed"`
-	Downloaded  int     `json:"downloaded"`
-	Error       *string `json:"error"`
-	Group       string  `json:"group"`
-	GroupID     string  `json:"groupId"`
-	Limit       *int    `json:"limit"`
-	StartedAt   int64   `json:"startedAt"`
-	FinishedAt  *int64  `json:"finishedAt"`
-	Cancelled   bool    `json:"cancelled"`
-	Mode        string  `json:"mode,omitempty"`
-	OffsetDate  int64   `json:"offsetDate,omitempty"` // unix seconds: only messages sent before
-	MinDate     int64   `json:"minDate,omitempty"`    // unix seconds: stop at messages sent before
-	accountID   string
-	query       string
-	cursor      int
-	minID       int
-	initialized bool
+	ID           string  `json:"id"`
+	State        string  `json:"state"`
+	Processed    int     `json:"processed"`
+	Downloaded   int     `json:"downloaded"`
+	Error        *string `json:"error"`
+	Group        string  `json:"group"`
+	GroupID      string  `json:"groupId"`
+	Limit        *int    `json:"limit"`
+	StartedAt    int64   `json:"startedAt"`
+	FinishedAt   *int64  `json:"finishedAt"`
+	Cancelled    bool    `json:"cancelled"`
+	Mode         string  `json:"mode,omitempty"`
+	OffsetDate   int64   `json:"offsetDate,omitempty"` // unix seconds: only messages sent before
+	MinDate      int64   `json:"minDate,omitempty"`    // unix seconds: stop at messages sent before
+	accountID    string
+	query        string
+	cursor       int
+	minID        int
+	initialized  bool
+	enginePaused bool
 }
 
 type historyRecord struct {
@@ -108,6 +109,8 @@ func (a *App) recoverHistoryJobs(ctx context.Context) error {
 	if pending > 0 {
 		a.startHistoryDrain(true)
 	}
+	// startHistoryWorker and startHistoryDrain respect the persisted Engine
+	// pause gate, so recovered work stays queued after an explicit Stop.
 	return nil
 }
 
@@ -254,7 +257,9 @@ func (a *App) handleHistoryStart(w http.ResponseWriter, r *http.Request) {
 		response["minDate"] = j.MinDate
 	}
 	a.historyMu.Unlock()
-	a.startHistoryWorker(jobID)
+	if a.engineWorkEnabled() {
+		a.startHistoryWorker(jobID)
+	}
 	writeJSON(w, 200, response)
 }
 
