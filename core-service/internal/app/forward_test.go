@@ -386,6 +386,76 @@ func TestForwardQueueRetryResetsFailedAndInterruptedJobs(t *testing.T) {
 	}
 }
 
+func TestForwardQueueSnapshotIncludesAllRetryableJobs(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	statuses := []string{"pending", "processing", "forwarded", "failed", "interrupted", "not_applicable"}
+	for i, status := range statuses {
+		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,status,created_at,updated_at)
+			VALUES('-1000000000123','Source',?,?,1,1)`, i+1, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 60; i++ {
+		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,status,created_at,updated_at)
+			VALUES('-1000000000123','Source',?,'failed',1,1)`, 100+i); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := a.forwardQueueSnapshot(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := snapshot["pending"].(int64)
+	active := snapshot["active"].(int64)
+	failed := snapshot["failed"].(int64)
+	interrupted := snapshot["interrupted"].(int64)
+	if snapshot["total"] != int64(65) || active != 1 || interrupted != 1 || pending+failed != 62 {
+		t.Fatalf("snapshot counts = total:%v pending:%v active:%v failed:%v interrupted:%v", snapshot["total"], snapshot["pending"], snapshot["active"], snapshot["failed"], snapshot["interrupted"])
+	}
+	if got := len(snapshot["items"].([]map[string]any)); got != forwardQueuePageSize {
+		t.Fatalf("first snapshot page items = %d, want %d", got, forwardQueuePageSize)
+	}
+	if snapshot["page"] != 1 || snapshot["pageSize"] != forwardQueuePageSize {
+		t.Fatalf("snapshot pagination = page:%v size:%v", snapshot["page"], snapshot["pageSize"])
+	}
+	secondPage, err := a.forwardQueueSnapshot(ctx, forwardQueuePageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSecondPage := int(secondPage["pending"].(int64)+secondPage["active"].(int64)+secondPage["failed"].(int64)+secondPage["interrupted"].(int64)) - forwardQueuePageSize
+	if got := len(secondPage["items"].([]map[string]any)); got != wantSecondPage || secondPage["page"] != 2 {
+		t.Fatalf("second snapshot page = %#v", secondPage)
+	}
+	lastPage, err := a.forwardQueueSnapshot(ctx, 50_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lastPage["page"] != 2 || len(lastPage["items"].([]map[string]any)) != wantSecondPage {
+		t.Fatalf("out-of-range page should clamp to last page: %#v", lastPage)
+	}
+	token, err := a.sessions.Create(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/forward-queue?page=2", nil)
+	req.AddCookie(&http.Cookie{Name: a.sessions.CookieName(), Value: token})
+	response := httptest.NewRecorder()
+	a.Handler().ServeHTTP(response, req)
+	if response.Code != http.StatusOK {
+		t.Fatalf("forward queue page status=%d body=%s", response.Code, response.Body.String())
+	}
+	var pageResponse map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &pageResponse); err != nil {
+		t.Fatal(err)
+	}
+	wantPageItems := int(pageResponse["pending"].(float64)+pageResponse["active"].(float64)+pageResponse["failed"].(float64)+pageResponse["interrupted"].(float64)) - forwardQueuePageSize
+	if pageResponse["page"] != float64(2) || len(pageResponse["items"].([]any)) != wantPageItems {
+		t.Fatalf("forward queue page response = %#v", pageResponse)
+	}
+}
+
 func TestUnresolvedCustomCaptionWithoutMessageIDDoesNotRetryAsNewForward(t *testing.T) {
 	ctx := context.Background()
 	a, fake := forwardTestApp(t, map[string]any{

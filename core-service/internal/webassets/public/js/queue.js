@@ -39,6 +39,7 @@ import { confirmSheet } from './sheet.js';
 //     instead of "everything appears at once on heavy filter change".
 const INITIAL_RENDER = 50;
 const PAGE_SIZE = 50;
+const FORWARD_PAGE_SIZE = 50;
 const RENDER_COALESCE_MS = 60; // collapse WS bursts into one rAF tick
 
 // Filter chip definitions. Order matters — also drives the keyboard tab order.
@@ -127,7 +128,8 @@ let globalPaused = false;
 let engineRunning = false;
 let maxSpeedConfig = null;
 let forwardQueueData = {};
-let monitorCounts = { queue: 0, active: 0, forward: 0 };
+let forwardQueuePage = 1;
+let monitorCounts = { queue: 0, active: 0 };
 let forwardOnly = false;
 
 // View state — survives across navigations to the same page.
@@ -522,12 +524,18 @@ function renderForwardQueue(data) {
     const items = allItems.filter((item) => forwardOnly
         ? item.status !== 'not_applicable'
         : ['pending', 'processing', 'failed', 'interrupted'].includes(item.status));
+    const actionableCount = Number(data.pending || 0) + Number(data.active || 0) + Number(data.failed || 0) + Number(data.interrupted || 0);
+    const pageCount = Math.max(1, Math.ceil(actionableCount / FORWARD_PAGE_SIZE));
+    forwardQueuePage = Math.min(Math.max(1, Number(data.page) || forwardQueuePage), pageCount);
+    const totalEl = document.getElementById('queue-forward-total');
+    if (totalEl) totalEl.textContent = i18nTf('queue.forward.total', { count: actionableCount }, `${actionableCount} actionable jobs`);
     if (!items.length) {
         const emptyKey = forwardOnly ? 'queue.forward.empty' : 'queue.forward.empty_pending';
         const emptyFallback = forwardOnly ? 'No forward jobs recorded' : 'No jobs are waiting to be forwarded';
         rows.innerHTML = `<p class="py-3 text-xs text-tg-textSecondary">${escapeHtml(i18nT(emptyKey, emptyFallback))}</p>`;
         return;
     }
+    const start = (forwardQueuePage - 1) * FORWARD_PAGE_SIZE;
     const statuses = {
         pending: 'queue.forward.status.pending',
         processing: 'queue.forward.status.active',
@@ -559,6 +567,15 @@ function renderForwardQueue(data) {
             ${destinationsDetail ? `<span class="text-tg-textSecondary">${escapeHtml(destinationsDetail)}</span>` : ''}${retry}
         </div>`;
     }).join('');
+    if (pageCount > 1) {
+        rows.insertAdjacentHTML('beforeend', `<div class="flex items-center justify-between gap-3 pt-3 text-xs text-tg-textSecondary">
+            <span>${escapeHtml(i18nTf('queue.forward.page', { start: start + 1, end: Math.min(start + FORWARD_PAGE_SIZE, actionableCount), total: actionableCount }, `${start + 1}–${Math.min(start + FORWARD_PAGE_SIZE, actionableCount)} of ${actionableCount}`))}</span>
+            <div class="flex gap-2">
+                <button type="button" class="tg-btn tg-btn-sm" data-forward-page="prev" ${forwardQueuePage <= 1 ? 'disabled' : ''}>${escapeHtml(i18nT('common.prev', 'Prev'))}</button>
+                <button type="button" class="tg-btn tg-btn-sm" data-forward-page="next" ${forwardQueuePage >= pageCount ? 'disabled' : ''}>${escapeHtml(i18nT('common.next', 'Next'))}</button>
+            </div>
+        </div>`);
+    }
 }
 
 function syncQueueSections() {
@@ -570,6 +587,20 @@ function syncQueueSections() {
         forwardPanel.classList.toggle('hidden', !forwardOnly && !hasWork);
     }
 }
+
+document.addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-forward-page]');
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    const nextPage = forwardQueuePage + (button.dataset.forwardPage === 'next' ? 1 : -1);
+    try {
+        const data = await api.get(`/api/forward-queue?page=${nextPage}`);
+        renderForwardQueue(data);
+    } catch (error) {
+        showToast(error?.message || 'Failed to load forward queue', 'error');
+        button.disabled = false;
+    }
+});
 
 // ============ WS handlers ============
 //
@@ -862,7 +893,7 @@ function _chipCounts() {
         all: store.size,
         active,
         queued,
-        forwarding: monitorCounts.forward,
+        forwarding: Number(forwardQueueData.pending || 0) + Number(forwardQueueData.active || 0) + Number(forwardQueueData.failed || 0) + Number(forwardQueueData.interrupted || 0),
         paused: statusCounts.get('paused') || 0,
         failed: statusCounts.get('failed') || 0,
         done,
@@ -1772,7 +1803,6 @@ export function initQueue() {
         monitorCounts = {
             queue: Number(status.queue) || 0,
             active: Number(status.active) || 0,
-            forward: Number(status.forward) || 0,
         };
         renderChips();
     });
@@ -1785,6 +1815,7 @@ export async function showQueuePage(params = {}) {
     view.visible = true;
     const isForwardRoute = params.status === 'forward' || params.status?.startsWith('forward_');
     forwardOnly = isForwardRoute;
+    forwardQueuePage = 1;
     if (isForwardRoute) {
         if (view.filter !== 'current') {
             view.filter = 'current';
@@ -1806,6 +1837,13 @@ export async function showQueuePage(params = {}) {
     }
     if (forwardOnly) selectionClear();
     if (!view.booted) await loadSnapshot();
+    else if (isForwardRoute && Number(forwardQueueData.page) > 1) {
+        try {
+            renderForwardQueue(await api.get('/api/forward-queue?page=1'));
+        } catch (error) {
+            showToast(error?.message || 'Failed to load forward queue', 'error');
+        }
+    }
     wireOnce();
     bindThrottleSlider();
     renderChips();
@@ -1816,6 +1854,7 @@ export async function showQueuePage(params = {}) {
     _patchSelectionDom();
     renderSelectionBar();
     updateNavBadge();
+    syncQueueSections();
 }
 
 // The ⋮ menu holds the speed limit, the global actions (Pause all …

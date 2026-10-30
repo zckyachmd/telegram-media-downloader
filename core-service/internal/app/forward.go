@@ -532,7 +532,12 @@ func (a *App) finishForwardQueue(ctx context.Context, job forwardJob, status, re
 	a.notifyForwardQueue()
 }
 
-func (a *App) forwardQueueSnapshot(ctx context.Context) (map[string]any, error) {
+const forwardQueuePageSize = 50
+
+func (a *App) forwardQueueSnapshot(ctx context.Context, offset int) (map[string]any, error) {
+	if offset < 0 {
+		offset = 0
+	}
 	var stats struct {
 		Total, Pending, Active, Forwarded, Failed, Interrupted, NotApplicable int64
 	}
@@ -541,14 +546,20 @@ func (a *App) forwardQueueSnapshot(ctx context.Context) (map[string]any, error) 
 		FROM tgdl_forward_queue`).Scan(&stats.Total, &stats.Pending, &stats.Active, &stats.Forwarded, &stats.Failed, &stats.Interrupted, &stats.NotApplicable); err != nil {
 		return nil, err
 	}
+	actionable := stats.Pending + stats.Active + stats.Failed + stats.Interrupted
+	if actionable == 0 {
+		offset = 0
+	} else if int64(offset) >= actionable {
+		offset = int((actionable - 1) / forwardQueuePageSize * forwardQueuePageSize)
+	}
 	rows, err := a.db.Reader.QueryContext(ctx, `SELECT id,group_id,group_name,message_id,file_name,topic_id,status,reason,created_at,forward_config_json,stage,destinations_json FROM tgdl_forward_queue
-		WHERE status IN ('pending','processing') OR id IN (SELECT id FROM tgdl_forward_queue WHERE status NOT IN ('pending','processing') ORDER BY id DESC LIMIT 50)
-		ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END,id DESC`)
+		WHERE status IN ('pending','processing') OR status IN ('failed','interrupted')
+		ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END,id DESC LIMIT ? OFFSET ?`, forwardQueuePageSize, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]map[string]any, 0, 50)
+	items := make([]map[string]any, 0, forwardQueuePageSize)
 	cfg, _ := a.config.Load(ctx)
 	for rows.Next() {
 		var queueID int64
@@ -583,7 +594,7 @@ func (a *App) forwardQueueSnapshot(ctx context.Context) (map[string]any, error) 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return map[string]any{"total": stats.Total - stats.NotApplicable, "pending": stats.Pending, "active": stats.Active, "forwarded": stats.Forwarded, "failed": stats.Failed, "interrupted": stats.Interrupted, "notApplicable": stats.NotApplicable, "items": items}, nil
+	return map[string]any{"total": stats.Total - stats.NotApplicable, "pending": stats.Pending, "active": stats.Active, "forwarded": stats.Forwarded, "failed": stats.Failed, "interrupted": stats.Interrupted, "notApplicable": stats.NotApplicable, "page": offset/forwardQueuePageSize + 1, "pageSize": forwardQueuePageSize, "items": items}, nil
 }
 
 // forwardSettings returns the chat's autoForward rule and forward account, or

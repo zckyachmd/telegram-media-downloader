@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.20] — 2026-10-30
+
+### Fixed
+- Forward queue now reports all failed and interrupted jobs, with stable 50-item server-side pagination and a live actionable backlog count.
+- Queue route changes keep the Forward and Download sections synchronized, and queue chips count failed/interrupted forwarding work.
+
 ## [3.4.19] — 2026-10-29
 
 ### Changed

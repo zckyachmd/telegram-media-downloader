@@ -24,6 +24,7 @@ func registerGalleryRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("GET /api/system/health", a.requireAdmin(http.HandlerFunc(a.handleAPISystemHealth)))
 	mux.Handle("GET /api/monitor/status", guard(http.HandlerFunc(a.handleAPIMonitorStatus)))
 	mux.Handle("GET /api/queue/snapshot", guard(http.HandlerFunc(a.handleAPIQueueSnapshot)))
+	mux.Handle("GET /api/forward-queue", guard(http.HandlerFunc(a.handleAPIForwardQueueSnapshot)))
 	mux.Handle("GET /api/downloads", guard(http.HandlerFunc(a.handleAPIDownloads)))
 	mux.Handle("GET /api/downloads/all", guard(http.HandlerFunc(a.handleAPIDownloadsAll)))
 	mux.Handle("GET /api/downloads/search", guard(http.HandlerFunc(a.handleAPIDownloadsSearch)))
@@ -120,13 +121,26 @@ func (a *App) handleAPIQueueSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 500, "queue read failed")
 		return
 	}
-	forwardQueue, err := a.forwardQueueSnapshot(r.Context())
+	forwardQueue, err := a.forwardQueueSnapshot(r.Context(), 0)
 	if err != nil {
 		writeJSONError(w, 500, "forward queue read failed")
 		return
 	}
 	snapshot["forwardQueue"] = forwardQueue
 	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func (a *App) handleAPIForwardQueueSnapshot(w http.ResponseWriter, r *http.Request) {
+	page, err := strconv.Atoi(r.URL.Query().Get("page"))
+	if err != nil || page < 1 {
+		page = 1
+	}
+	forwardQueue, err := a.forwardQueueSnapshot(r.Context(), (page-1)*forwardQueuePageSize)
+	if err != nil {
+		writeJSONError(w, 500, "forward queue read failed")
+		return
+	}
+	writeJSON(w, http.StatusOK, forwardQueue)
 }
 
 func (a *App) handleAPIStats(w http.ResponseWriter, r *http.Request) {

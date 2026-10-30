@@ -349,7 +349,7 @@ func (a *App) registerMCPTools(server *mcp.Server) {
 		out := a.filterQueueSnapshot(ctx, snapshot, agent)
 		forward := map[string]any{"total": 0, "pending": 0, "active": 0, "forwarded": 0, "failed": 0, "interrupted": 0, "items": []map[string]any{}}
 		if agent.AllowsScope("forward.read") && tokenHasScope(tokenScopes, "forward.read") {
-			forward, err = a.forwardQueueSnapshot(ctx)
+			forward, err = a.forwardQueueSnapshot(ctx, 0)
 			if err != nil {
 				return nil, err
 			}
@@ -423,7 +423,7 @@ func (a *App) registerMCPTools(server *mcp.Server) {
 		if in.ID <= 0 || !agent.AllowsChat(groupID) || !a.mcpChatAccountsAllowed(ctx, agent, groupID) {
 			return nil, errors.New("agent is not allowed to retry this forward item")
 		}
-		forwardSnapshot, err := a.forwardQueueSnapshot(ctx)
+		forwardSnapshot, err := a.forwardQueueSnapshot(ctx, 0)
 		if err != nil {
 			return nil, err
 		}
