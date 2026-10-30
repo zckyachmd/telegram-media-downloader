@@ -209,6 +209,28 @@ func renderGalleryThumb(ctx context.Context, source, tmp string, accels []string
 			if _, err := exec.CommandContext(ctx, "ffmpeg", args...).CombinedOutput(); err == nil && thumbFileNonEmpty(tmp) {
 				return true
 			}
+			_ = os.Remove(tmp)
+			if _, err := exec.LookPath("cwebp"); err == nil {
+				png, err := os.CreateTemp(filepath.Dir(tmp), ".thumb-*.png")
+				if err == nil {
+					pngPath := png.Name()
+					_ = png.Close()
+					pngArgs := []string{"-hide_banner", "-loglevel", "error"}
+					if hw != "" {
+						pngArgs = append(pngArgs, "-hwaccel", hw)
+					}
+					pngArgs = append(pngArgs, seek...)
+					pngArgs = append(pngArgs, "-i", source, "-frames:v", "1", "-an", "-vf", "scale='min(320,iw)':-1:flags=fast_bilinear", "-f", "image2", "-y", pngPath)
+					_, ffmpegErr := exec.CommandContext(ctx, "ffmpeg", pngArgs...).CombinedOutput()
+					if pngInfo, err := os.Stat(pngPath); ffmpegErr == nil && err == nil && pngInfo.Mode().IsRegular() && pngInfo.Size() > 0 {
+						if err := exec.CommandContext(ctx, "cwebp", "-quiet", "-q", "62", "-m", "6", pngPath, "-o", tmp).Run(); err == nil && thumbFileNonEmpty(tmp) {
+							_ = os.Remove(pngPath)
+							return true
+						}
+					}
+					_ = os.Remove(pngPath)
+				}
+			}
 			if ctx.Err() != nil {
 				_ = os.Remove(tmp)
 				return false
