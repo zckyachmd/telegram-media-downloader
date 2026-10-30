@@ -51,7 +51,7 @@ const STATUS_FILTERS = [
         id: 'current',
         i18n: 'queue.chip.current',
         fallback: 'Active',
-        match: (j) => j.status === 'active' || j.status === 'queued',
+        match: (j) => j.status === 'active' || j.status === 'queued' || ['pending', 'processing'].includes(j.forwardStatus),
     },
     {
         id: 'failed',
@@ -59,7 +59,12 @@ const STATUS_FILTERS = [
         fallback: 'Failed',
         match: (j) => j.status === 'failed',
     },
-    { id: 'done', i18n: 'queue.chip.done', fallback: 'Done', match: (j) => j.status === 'done' },
+    {
+        id: 'done',
+        i18n: 'queue.chip.done',
+        fallback: 'Done',
+        match: (j) => j.status === 'done' && !['pending', 'processing'].includes(j.forwardStatus),
+    },
     { id: 'all', i18n: 'queue.chip.all', fallback: 'All', match: () => true },
     // Narrower views, after a divider.
     {

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
@@ -60,6 +61,12 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 	if err != nil {
 		return download.Record{}, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
 	}
+	type directForwardResult struct {
+		job forwardJob
+		err error
+	}
+	var parallelForward *forwardJob
+	var directResult <-chan directForwardResult
 	if forward && forwardSettings["directForward"] == true && forwardSettings["deleteAfterForward"] == true && directForward != nil && ttl == 0 && !item.SkipDuplicates && len(matchingForwardRoutes(forwardSettings, telegram.MessageTopicID(message))) > 0 {
 		cfg, _ := a.config.Load(ctx)
 		topicID := telegram.MessageTopicID(message)
@@ -76,84 +83,42 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 		if len(destinations) > 0 && !needsUpload {
 			job := forwardJob{groupID: item.GroupID, groupName: groupName, fileName: attachment.Name, messageID: message.ID, topicID: topicID, text: message.Message, historyID: attemptID, facts: attachment.Facts, settings: forwardSettings, accountID: forwardAccountID, stage: "native_forward", destinations: destinations}
 			job.directForward = directForward
-			if !a.reserveForward(job) {
-				return download.Record{}, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, errors.New("forward queue is full"))
+			if a.reserveForward(&job) {
+				result := make(chan directForwardResult, 1)
+				go func() {
+					nativeJob := job
+					baseCtx := a.ctx
+					if baseCtx == nil {
+						baseCtx = context.Background()
+					}
+					forwardCtx, cancel := context.WithTimeout(baseCtx, forwardTimeout(attachment.Identity.Size))
+					defer cancel()
+					err := a.directForwardNow(forwardCtx, &nativeJob)
+					result <- directForwardResult{job: nativeJob, err: err}
+				}()
+				parallelForward, directResult = &job, result
 			}
-			if err := a.directForwardNow(ctx, &job); err != nil {
-				if errors.Is(err, telegram.ErrForwardCaptionUnresolved) {
-					job.stage = "caption_edit_failed"
-					a.updateForwardReservation(ctx, job, "failed", err.Error())
-					a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
-					a.failProcessingForward(context.WithoutCancel(ctx), attemptID, err)
-					return download.Record{}, err
-				}
-				job.stage = "fallback_download"
-				a.persistForwardProgress(ctx, job)
-				record, downloadErr := a.library.Ingest(ctx, item, telegram.AttachmentClient{Source: transport, Media: attachment})
-				if downloadErr != nil {
-					a.updateForwardReservation(ctx, job, "failed", downloadErr.Error())
-					return record, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, downloadErr)
-				}
-				job.path, job.recordID = record.Path, record.ID
-				latestConfig, configErr := a.config.Load(ctx)
-				if configErr != nil {
-					a.updateForwardReservation(ctx, job, "failed", configErr.Error())
-					a.failProcessingForward(context.WithoutCancel(ctx), attemptID, configErr)
-					return record, configErr
-				}
-				if !autoForwardEnabled(latestConfig, item.GroupID) {
-					if err := a.finishProcessingAttempt(ctx, attemptID, "downloaded", "", record.SHA256, "not_applicable"); err != nil {
-						return record, err
-					}
-					job.stage = "complete"
-					a.updateForwardReservation(ctx, job, "not_applicable", "")
-					return record, nil
-				}
-				lastPending := -1
-				for i := range job.destinations {
-					if job.destinations[i].Status != "forwarded" {
-						lastPending = i
-					}
-				}
-				job.stage = "fallback_upload"
-				a.persistForwardProgress(ctx, job)
-				for i := range job.destinations {
-					if job.destinations[i].Status == "forwarded" {
-						continue
-					}
-					settings := job.destinations[i].Settings
-					job.destinations[i].Status, job.destinations[i].Method = "processing", "upload"
-					a.persistForwardProgress(ctx, job)
-					deleteAfter := forwardSettings["deleteAfterForward"] == true && i == lastPending
-					if !a.forwardToRoute(ctx, &job, forwardAccountID, settings, deleteAfter) {
-						err := errors.New("direct forward failed and upload fallback failed")
-						a.updateForwardReservation(ctx, job, "failed", err.Error())
-						a.failProcessingForward(context.WithoutCancel(ctx), attemptID, err)
-						return record, err
-					}
-					job.destinations[i].Status, job.destinations[i].Method = "forwarded", "upload"
-					job.destinations[i].Reason = ""
-					a.persistForwardProgress(ctx, job)
-				}
-				if err := a.finishProcessingAttempt(ctx, attemptID, "downloaded", "", record.SHA256, "forwarded"); err != nil {
-					return record, err
-				}
-				job.stage = "complete"
-				a.updateForwardReservation(ctx, job, "forwarded", "")
-				a.finishProcessingForward(ctx, attemptID, "forwarded")
-				return record, nil
-			}
-			if err := a.finishProcessingAttempt(ctx, attemptID, "forwarded_direct", "", "", "forwarded"); err != nil {
-				return download.Record{}, err
-			}
-			a.updateForwardReservation(ctx, job, "forwarded", "")
-			a.finishProcessingForward(ctx, attemptID, "forwarded")
-			return download.Record{}, nil
 		}
 	}
 	record, err := a.library.Ingest(ctx, item, telegram.AttachmentClient{Source: transport, Media: attachment})
 	if err != nil {
-		return record, a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
+		failure := a.failProcessingAttempt(context.WithoutCancel(ctx), attemptID, err)
+		if parallelForward != nil {
+			go func() {
+				result := <-directResult
+				job := result.job
+				if result.err != nil {
+					a.updateForwardReservation(context.WithoutCancel(ctx), job, "failed", result.err.Error())
+					a.failProcessingForward(context.WithoutCancel(ctx), attemptID, result.err)
+					a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "failed")
+				} else {
+					job.stage = "complete"
+					a.updateForwardReservation(context.WithoutCancel(ctx), job, "forwarded", "")
+					a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "forwarded")
+				}
+			}()
+		}
+		return record, failure
 	}
 	outcome := "downloaded"
 	if record.Skipped {
@@ -180,7 +145,41 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 		a.hub.Broadcast(ws.Event{Type: "monitor_download", Payload: map[string]any{"group": groupName, "type": "ttl", "messageId": message.ID, "ttl": ttl}})
 	}
 	if forward {
-		a.queueForward(forwardJob{groupID: item.GroupID, groupName: groupName, messageID: message.ID, topicID: telegram.MessageTopicID(message), text: message.Message, recordID: record.ID, historyID: attemptID, path: record.Path, facts: attachment.Facts, settings: forwardSettings, accountID: forwardAccountID})
+		if parallelForward == nil {
+			a.queueForward(forwardJob{groupID: item.GroupID, groupName: groupName, messageID: message.ID, topicID: telegram.MessageTopicID(message), text: message.Message, recordID: record.ID, historyID: attemptID, path: record.Path, facts: attachment.Facts, settings: forwardSettings, accountID: forwardAccountID})
+		} else {
+			job := *parallelForward
+			job.recordID, job.path = record.ID, record.Path
+			go func() {
+				result := <-directResult
+				job.stage, job.destinations = result.job.stage, result.job.destinations
+				if result.err != nil {
+					if errors.Is(result.err, telegram.ErrForwardCaptionUnresolved) {
+						a.updateForwardReservation(context.WithoutCancel(ctx), job, "failed", result.err.Error())
+						a.failProcessingForward(context.WithoutCancel(ctx), attemptID, result.err)
+						a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "failed")
+						return
+					}
+					job.stage = "fallback_upload"
+					a.updateForwardReservation(context.WithoutCancel(ctx), job, "pending", "")
+					select {
+					case a.forwards <- struct{}{}:
+					default:
+					}
+					return
+				}
+				if err := a.finishProcessingAttempt(context.WithoutCancel(ctx), attemptID, "downloaded", "", record.SHA256, "forwarded", true); err != nil {
+					if a.output != nil {
+						fmt.Fprintf(a.output, "AutoForward: could not finalize forwarded download: %v\n", err)
+					}
+					return
+				}
+				a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "forwarded")
+				job.stage = "complete"
+				a.updateForwardReservation(context.WithoutCancel(ctx), job, "forwarded", "")
+				a.deleteForwarded(context.WithoutCancel(ctx), job)
+			}()
+		}
 	}
 	payload := map[string]any{"key": item.GroupID + "_" + strconv.FormatInt(item.MessageID, 10), "groupId": item.GroupID, "groupName": item.GroupName, "messageId": item.MessageID, "fileName": item.Name, "filePath": record.Path, "fileSize": item.Identity.Size, "mediaType": item.Type, "deduped": record.Reused, "addedAt": nil, "accountId": accountID, "accountName": nil}
 	a.hub.Broadcast(ws.Event{Type: "download_complete", Payload: payload})

@@ -126,10 +126,12 @@ func (a *App) queueForward(job forwardJob) {
 		return
 	}
 	globalConfig, _ := a.config.Load(ctx)
-	var resolved []forwardDestination
-	for _, route := range matchingForwardRoutes(job.settings, job.topicID) {
-		settings := effectiveForwardProtection(inheritCaptionSettings(route, job.settings), job.settings, route, job.topicID, globalConfig)
-		resolved = append(resolved, forwardDestination{Settings: settings, Status: "pending"})
+	resolved := job.destinations
+	if len(resolved) == 0 {
+		for _, route := range matchingForwardRoutes(job.settings, job.topicID) {
+			settings := effectiveForwardProtection(inheritCaptionSettings(route, job.settings), job.settings, route, job.topicID, globalConfig)
+			resolved = append(resolved, forwardDestination{Settings: settings, Status: "pending"})
+		}
 	}
 	forwardConfig, err := json.Marshal(forwardConfigSnapshot{Settings: job.settings, AccountID: job.accountID, Destinations: resolved})
 	if err != nil {
@@ -189,7 +191,7 @@ func (a *App) queueForward(job forwardJob) {
 	}
 }
 
-func (a *App) reserveForward(job forwardJob) bool {
+func (a *App) reserveForward(job *forwardJob) bool {
 	ctx := a.ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -213,7 +215,7 @@ func (a *App) reserveForward(job forwardJob) bool {
 		return false
 	}
 	now := time.Now().UnixMilli()
-	if tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, job.fileName, job.topicID, job.text, 0, "", string(facts), string(forwardConfig), job.stage, now, now).Scan(&job.queueID) != nil {
+	if tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,status,stage,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,'processing',?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, job.fileName, job.topicID, job.text, 0, "", string(facts), string(forwardConfig), job.stage, now, now).Scan(&job.queueID) != nil {
 		return false
 	}
 	if tx.Commit() != nil {
@@ -224,7 +226,12 @@ func (a *App) reserveForward(job forwardJob) bool {
 }
 
 func (a *App) updateForwardReservation(ctx context.Context, job forwardJob, status, reason string) {
-	_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,updated_at=?,completed_at=? WHERE history_id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), time.Now().UnixMilli(), time.Now().UnixMilli(), job.historyID)
+	now := time.Now().UnixMilli()
+	completedAt := now
+	if status == "pending" || status == "processing" {
+		completedAt = 0
+	}
+	_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,updated_at=?,completed_at=? WHERE history_id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), now, completedAt, job.historyID)
 	a.notifyForwardQueue()
 }
 
@@ -257,7 +264,11 @@ func (a *App) directForwardNow(ctx context.Context, job *forwardJob) error {
 		if forwardErr != nil {
 			job.destinations[i].DirectFailed = true
 			job.destinations[i].Reason = "direct forward failed"
-			job.stage = "fallback_download"
+			if errors.Is(forwardErr, telegram.ErrForwardCaptionUnresolved) {
+				job.stage = "caption_edit_failed"
+			} else {
+				job.stage = "fallback_download"
+			}
 			a.persistForwardProgress(ctx, *job)
 			return forwardErr
 		}

@@ -145,9 +145,9 @@ func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
 	ctx := context.Background()
 	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "directForward": true, "captionMode": "native"})
 	var directCalls atomic.Int32
-	transport := mediaTransport(func(context.Context, telegram.Attachment, io.Writer) error {
-		t.Fatal("direct forward downloaded media")
-		return nil
+	transport := mediaTransport(func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
+		_, err := w.Write([]byte("media"))
+		return err
 	})
 	_, err := a.ingestTelegramWithForward(ctx, docMessage(10, 123, 77, "native caption"), "", "Source", "acct1", transport, func(_ context.Context, request telegram.ForwardMessageRequest) error {
 		if request.Destination != "@Archive" || request.MessageID != 10 {
@@ -159,9 +159,14 @@ func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if directCalls.Load() != 1 || len(fake.calls()) != 0 {
-		t.Fatalf("direct=%d uploads=%d", directCalls.Load(), len(fake.calls()))
+	eventually(t, "native forward", func() bool { return directCalls.Load() == 1 })
+	if len(fake.calls()) != 0 {
+		t.Fatalf("unexpected uploads=%d", len(fake.calls()))
 	}
+	eventually(t, "local copy deletion", func() bool {
+		_, exists := rowPath(t, a, "-1000000000123", 10)
+		return !exists
+	})
 	if _, exists := rowPath(t, a, "-1000000000123", 10); exists {
 		t.Fatal("direct-forwarded media was saved locally")
 	}
@@ -206,6 +211,44 @@ func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
 	}
 }
 
+func TestAutoForwardReturnsBeforeNativeForwardCompletes(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "deleteAfterForward": true, "directForward": true, "captionMode": "native"})
+	started, release := make(chan struct{}), make(chan struct{})
+	transport := mediaTransport(func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
+		_, err := w.Write([]byte("media"))
+		return err
+	})
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.ingestTelegramWithForward(ctx, docMessage(901, 123, 99, "native caption"), "", "Source", "acct1", transport, func(context.Context, telegram.ForwardMessageRequest) error {
+			close(started)
+			<-release
+			return nil
+		})
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("native forward did not start")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("ingest waited for native forward instead of queueing it")
+	}
+	close(release)
+	eventually(t, "download finishing", func() bool {
+		var status string
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT outcome FROM tgdl_processing_attempts WHERE message_id=901 ORDER BY id DESC LIMIT 1`).Scan(&status)
+		return status == "downloaded"
+	})
+}
+
 func TestCustomCaptionUsesDirectForwardThenEdit(t *testing.T) {
 	ctx := context.Background()
 	a, fake := forwardTestApp(t, map[string]any{
@@ -213,13 +256,13 @@ func TestCustomCaptionUsesDirectForwardThenEdit(t *testing.T) {
 		"directForward": true, "captionMode": "custom", "captionBase": "custom",
 		"caption": "Hi {{source_name}} #{{message_id}}",
 	})
-	transport := mediaTransport(func(context.Context, telegram.Attachment, io.Writer) error {
-		t.Fatal("custom caption direct path downloaded media")
-		return nil
+	transport := mediaTransport(func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
+		_, err := w.Write([]byte("media"))
+		return err
 	})
-	var request telegram.ForwardMessageRequest
+	requestCh := make(chan telegram.ForwardMessageRequest, 1)
 	_, err := a.ingestTelegramWithForward(ctx, docMessage(13, 123, 80, "source caption"), "", "Source", "acct1", transport, func(_ context.Context, req telegram.ForwardMessageRequest) error {
-		request = req
+		requestCh <- req
 		if req.ResultMessageID != nil {
 			*req.ResultMessageID = 42
 		}
@@ -228,26 +271,36 @@ func TestCustomCaptionUsesDirectForwardThenEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var request telegram.ForwardMessageRequest
+	select {
+	case request = <-requestCh:
+	case <-time.After(time.Second):
+		t.Fatal("native forward did not start")
+	}
 	if !request.EditCaption || request.Caption != "Hi Source #13" {
 		t.Fatalf("native forward request=%+v", request)
 	}
 	if len(fake.calls()) != 0 {
 		t.Fatalf("unexpected upload calls: %d", len(fake.calls()))
 	}
+	eventually(t, "local copy deletion", func() bool {
+		_, exists := rowPath(t, a, "-1000000000123", 13)
+		return !exists
+	})
 	if _, exists := rowPath(t, a, "-1000000000123", 13); exists {
 		t.Fatal("direct-forwarded media was saved locally")
 	}
 }
 
-func TestUnresolvedCustomCaptionForwardFailsQueueWithoutDownload(t *testing.T) {
+func TestUnresolvedCustomCaptionForwardFailsWithoutDuplicateUpload(t *testing.T) {
 	ctx := context.Background()
 	a, _ := forwardTestApp(t, map[string]any{
 		"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
 		"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "custom",
 	})
-	transport := mediaTransport(func(context.Context, telegram.Attachment, io.Writer) error {
-		t.Fatal("unresolved caption edit must not start duplicate fallback upload")
-		return nil
+	transport := mediaTransport(func(_ context.Context, _ telegram.Attachment, w io.Writer) error {
+		_, err := w.Write([]byte("media"))
+		return err
 	})
 	_, err := a.ingestTelegramWithForward(ctx, docMessage(14, 123, 81, "source caption"), "", "Source", "acct1", transport, func(_ context.Context, request telegram.ForwardMessageRequest) error {
 		if request.ResultMessageID != nil {
@@ -255,9 +308,14 @@ func TestUnresolvedCustomCaptionForwardFailsQueueWithoutDownload(t *testing.T) {
 		}
 		return telegram.ErrForwardCaptionUnresolved
 	})
-	if !errors.Is(err, telegram.ErrForwardCaptionUnresolved) {
+	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
+	eventually(t, "caption failure recorded", func() bool {
+		var status string
+		_ = a.db.Reader.QueryRowContext(ctx, `SELECT forward_status FROM tgdl_processing_attempts WHERE message_id=14 ORDER BY id DESC LIMIT 1`).Scan(&status)
+		return status == "failed"
+	})
 	var status, stage, states string
 	if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,stage,destinations_json FROM tgdl_forward_queue ORDER BY id DESC LIMIT 1`).Scan(&status, &stage, &states); err != nil {
 		t.Fatal(err)
@@ -342,6 +400,10 @@ func TestDirectForwardFailureDownloadsThenUploads(t *testing.T) {
 	if calls[0].body != "media" || calls[0].req.Protect {
 		t.Fatalf("fallback upload=%+v body=%q", calls[0].req, calls[0].body)
 	}
+	eventually(t, "fallback local copy deletion", func() bool {
+		_, exists := rowPath(t, a, "-1000000000123", 12)
+		return !exists
+	})
 	if _, exists := rowPath(t, a, "-1000000000123", 12); exists {
 		t.Fatal("fallback download was retained despite delete-after-forward")
 	}
