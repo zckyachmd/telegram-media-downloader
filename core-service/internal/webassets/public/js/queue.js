@@ -579,24 +579,34 @@ function renderForwardQueue(data) {
             : item.stage === 'fallback_upload'
                 ? i18nT('queue.forward.stage.fallback_upload', 'Uploading fallback')
                 : (item.stage || '—');
-        const reason = item.reason ? `<p class="mt-1 text-xs text-red-400 break-words">${escapeHtml(item.reason)}</p>` : '';
+        const reason = item.reason ? `<span class="text-red-400/80 truncate" title="${escapeHtml(item.reason)}">${escapeHtml(item.reason)}</span>` : '';
         const destinationStates = item.destinationStates || [];
         const destinationsDetail = destinationStates.length > 1 || destinationStates.some((d) => d.settings?.protect || d.directFailed)
             ? destinationStates.map((d) => `${d.method || '—'} · ${d.status || 'pending'}${d.settings?.protect ? ' · protected' : ''}${d.directFailed ? ` · ${i18nT('queue.forward.direct_failed', 'Direct failed')}` : ''}`).join('; ')
             : '';
         const retry = ['failed', 'interrupted'].includes(item.status)
-            ? `<button type="button" class="tg-btn-secondary tg-btn-sm min-h-11" data-forward-retry="${escapeHtml(item.id)}">${escapeHtml(i18nT('queue.forward.retry', 'Retry'))}</button>`
+            ? `<button type="button" class="tg-btn-secondary tg-btn-sm min-h-11 md:min-h-8" data-forward-retry="${escapeHtml(item.id)}">${escapeHtml(i18nT('queue.forward.retry', 'Retry'))}</button>`
             : '';
-        const statusClass = item.status === 'failed' ? 'text-red-400' : 'text-tg-text';
-        return `<article class="grid grid-cols-1 gap-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-            <div class="min-w-0">
-                <p class="truncate text-sm font-medium text-tg-text" title="${escapeHtml(item.fileName || `#${item.messageId}`)}">${escapeHtml(item.fileName || `#${item.messageId}`)}</p>
-                <p class="mt-1 text-xs text-tg-textSecondary">${escapeHtml(group)} · #${escapeHtml(item.messageId)}</p>
-                <p class="mt-1 truncate text-xs text-tg-textSecondary" title="${escapeHtml(destinations)}">${escapeHtml(i18nT('queue.forward.destination', 'To'))}: ${escapeHtml(destinations)}</p>
-                ${reason}${destinationsDetail ? `<p class="mt-1 text-xs text-tg-textSecondary">${escapeHtml(destinationsDetail)}</p>` : ''}
+        const statusClass = {
+            failed: 'bg-red-500/20 text-red-400',
+            interrupted: 'bg-tg-orange/20 text-tg-orange',
+            processing: 'bg-tg-blue/20 text-tg-blue',
+            pending: 'bg-gray-700/40 text-gray-300',
+            forwarded: 'bg-tg-green/20 text-tg-green',
+        }[item.status] || 'bg-gray-700/40 text-gray-300';
+        return `<article class="flex items-center gap-2 px-3 py-2 hover:bg-tg-hover/40">
+            <div class="min-w-0 flex-1">
+                <p class="truncate text-sm text-tg-text" title="${escapeHtml(item.fileName || `#${item.messageId}`)}">${escapeHtml(item.fileName || `#${item.messageId}`)}</p>
+                <p class="flex min-w-0 flex-wrap items-center gap-x-1.5 text-[11px] text-tg-textSecondary">
+                    <span class="max-w-full truncate">${escapeHtml(group)}</span><span aria-hidden="true">·</span><span>#${escapeHtml(item.messageId)}</span><span aria-hidden="true">·</span>
+                    <span class="min-w-0 truncate" title="${escapeHtml(destinations)}">${escapeHtml(i18nT('queue.forward.destination', 'To'))}: ${escapeHtml(destinations)}</span>
+                    ${destinationsDetail ? `<span class="min-w-0 truncate" title="${escapeHtml(destinationsDetail)}"><span aria-hidden="true">·</span> ${escapeHtml(destinationsDetail)}</span>` : ''}
+                    ${reason ? `<span class="inline-flex min-w-0 max-w-full items-center gap-1">· ${reason}</span>` : ''}
+                </p>
             </div>
-            <div class="flex items-center justify-between gap-3 sm:justify-end">
-                <span class="min-w-0 text-xs"><span class="font-medium ${statusClass}">${escapeHtml(status)}</span><span class="text-tg-textSecondary"> · ${escapeHtml(stage)}</span></span>
+            <div class="flex shrink-0 items-center gap-2">
+                <span class="hidden max-w-32 truncate text-[11px] text-tg-textSecondary sm:inline" title="${escapeHtml(stage)}">${escapeHtml(stage)}</span>
+                <span class="whitespace-nowrap rounded-full px-2 py-0.5 text-[10px] font-medium ${statusClass}">${escapeHtml(status)}</span>
                 ${retry}
             </div>
         </article>`;

@@ -1731,15 +1731,15 @@
                         <div id="queue-chips" class="queue-chip-row" role="toolbar" data-i18n-aria-label="queue.chips_label" aria-label="Filter queue jobs"></div>
                     </section>
                     <section id="queue-forward-panel" class="hidden bg-tg-panel rounded-xl p-3 mb-3" aria-labelledby="queue-forward-heading">
-                        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
+                        <div class="flex items-center justify-between gap-2 mb-2">
                             <div class="min-w-0">
                                 <h2 id="queue-forward-heading" class="text-sm font-medium text-tg-text flex items-center gap-2">
                                     <i class="ri-send-plane-line text-tg-blue" aria-hidden="true"></i>
                                     <span data-i18n="queue.forward.group">Forward</span>
                                 </h2>
-                                <p id="queue-forward-total" class="mt-1 text-xs text-tg-textSecondary" aria-live="polite"></p>
+                                <p id="queue-forward-total" class="mt-0.5 text-xs text-tg-textSecondary" aria-live="polite"></p>
                             </div>
-                            <button id="queue-forward-retry-all" type="button" class="tg-btn tg-btn-sm min-h-11 shrink-0" data-forward-retry-all disabled>
+                            <button id="queue-forward-retry-all" type="button" class="tg-btn-secondary tg-btn-sm min-h-9 shrink-0 whitespace-nowrap px-2.5 text-xs" data-forward-retry-all disabled>
                                 <i class="ri-restart-line mr-1" aria-hidden="true"></i>
                                 <span data-i18n="queue.forward.retry_all_button">Retry failed &amp; interrupted (0)</span>
                             </button>
