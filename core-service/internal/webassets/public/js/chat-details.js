@@ -82,6 +82,22 @@ let savedTimer = null;
 let wsWired = false;
 let forwardRouteSequence = 0;
 const forumTopicsCache = new Map();
+let dialogsRequest = null;
+
+function loadDialogs() {
+    if (state.allDialogs) return Promise.resolve(state.allDialogs);
+    if (!dialogsRequest) {
+        dialogsRequest = api.get('/api/dialogs').then((result) => {
+            state.allDialogs = result?.dialogs || [];
+            if (Array.isArray(result?.accounts)) state.dialogsAccounts = result.accounts;
+            return state.allDialogs;
+        }).catch((error) => {
+            dialogsRequest = null;
+            throw error;
+        });
+    }
+    return dialogsRequest;
+}
 
 function root() {
     let el = document.getElementById('page-chat');
@@ -663,18 +679,7 @@ function updateRouteWildcardState() {
 
 async function loadForwardRouteOptions(route = null) {
     const cards = route ? [route] : [...(document.querySelectorAll('[data-forward-route]') || [])];
-    if (!state.allDialogs && !state._forwardDialogsLoading && !state._forwardDialogsFailed) {
-        state._forwardDialogsLoading = api
-            .get('/api/dialogs')
-            .then((result) => {
-                state.allDialogs = result?.dialogs || [];
-                if (Array.isArray(result?.accounts)) state.dialogsAccounts = result.accounts;
-            })
-            .catch(() => {
-                state._forwardDialogsFailed = true;
-            });
-    }
-    if (!state.allDialogs && state._forwardDialogsLoading) await state._forwardDialogsLoading;
+    if (!state.allDialogs) await loadDialogs().catch(() => {});
     for (const card of cards) {
         const source = card.querySelector('[data-route-source-topic]');
         const destination = card.querySelector('[data-route-destination]');
@@ -697,12 +702,12 @@ async function loadForwardRouteOptions(route = null) {
     await Promise.all(cards.map(async (card) => {
         const destination = card.querySelector('[data-route-destination]');
         const targetTopic = card.querySelector('[data-route-destination-topic]');
-        if (targetTopic && destination?.value && !['storage', 'me'].includes(destination.value)) {
-            await loadTopicOptions(targetTopic, destination.value, i18nT('group.fwd.no_topic', 'No topic'), true);
-            targetTopic.dataset.selected = targetTopic.value || '0';
-        } else if (targetTopic) {
-            targetTopic.innerHTML = `<option value="0">${escapeHtml(i18nT('group.fwd.no_topic', 'No topic'))}</option>`;
-            targetTopic.disabled = true;
+        if (targetTopic) {
+            const selected = targetTopic.dataset.selected || targetTopic.value || '0';
+            targetTopic.innerHTML = `<option value="0">${escapeHtml(i18nT('group.fwd.no_topic', 'No topic'))}</option>${selected !== '0' ? `<option value="${escapeHtml(selected)}" selected>${escapeHtml(i18nT('group.fwd.no_topic', 'No topic'))} #${escapeHtml(selected)}</option>` : ''}`;
+            targetTopic.value = selected;
+            targetTopic.disabled = !destination?.value || ['storage', 'me'].includes(destination.value);
+            targetTopic.dataset.selected = selected;
             targetTopic.closest('[data-route-destination-topic-wrap]')?.classList.add('hidden');
         }
         card.querySelectorAll('[data-search-select] select').forEach((select) => filterSearchOptions(select));
@@ -1099,10 +1104,7 @@ function accountLabel(a) {
 async function loadAccountsAndPeers(token) {
     const [accounts, peers] = await Promise.all([
         api.get('/api/accounts').catch(() => []),
-        api
-            .get('/api/cluster/peers')
-            .then((r) => (Array.isArray(r?.peers) ? r.peers : []))
-            .catch(() => []),
+        api.get('/api/cluster/peers').then((r) => (Array.isArray(r?.peers) ? r.peers : [])).catch(() => []),
     ]);
     if (!cur || cur.token !== token) return;
     const g = cur.group;
@@ -1176,18 +1178,11 @@ async function loadStats(token) {
 // page from a deep link / the sidebar may happen before the Chats page
 // ever loaded it — fetch it once in the background (the server caches it).
 async function loadDialogMeta(token) {
-    if (findDialog(cur.id) || state._chatDialogsLoading) return;
-    state._chatDialogsLoading = true;
+    if (findDialog(cur.id)) return;
     try {
-        const r = await api.get('/api/dialogs');
-        const list = r?.dialogs || [];
-        if (!state.allDialogs) state.allDialogs = list;
-        if (Array.isArray(r?.accounts) && !state.dialogsAccounts)
-            state.dialogsAccounts = r.accounts;
+        await loadDialogs();
     } catch {
         /* no account / not connected — the hero just shows less */
-    } finally {
-        state._chatDialogsLoading = false;
     }
     if (!cur || cur.token !== token) return;
     const meta = document.querySelector('#page-chat [data-cd-meta]');
@@ -1942,8 +1937,8 @@ function repositionOpenSearchSelects() {
         menu.style.width = `${Math.min(rect.width, window.innerWidth - margin * 2)}px`;
         const roomBelow = Math.max(0, window.innerHeight - rect.bottom - margin * 2);
         const roomAbove = Math.max(0, rect.top - margin * 2);
-        const openBelow = roomBelow >= Math.min(180, menu.scrollHeight) || roomBelow >= roomAbove;
-        const height = Math.min(menu.scrollHeight, openBelow ? roomBelow : roomAbove);
+        const openBelow = roomBelow >= roomAbove;
+        const height = Math.max(0, Math.min(240, window.innerHeight * 0.42, openBelow ? roomBelow : roomAbove));
         menu.dataset.placement = openBelow ? 'below' : 'above';
         menu.style.maxHeight = `${height}px`;
         menu.style.top = `${openBelow ? rect.bottom + margin : Math.max(margin, rect.top - height - margin)}px`;
@@ -2055,15 +2050,19 @@ export function showChatDetails({ groupId, from = null, fromGroup = null, onName
     loadStats(token);
     loadAccountsAndPeers(token);
     loadDialogMeta(token);
-    void api.get('/api/config').then((config) => {
-        globalForwardProtection = config?.forwarding?.protect === true;
-        if (cur?.token !== token) return;
-        if (fwdSettingsNow().protect == null) setSwitch('fwd-protect-toggle', globalForwardProtection);
+    globalForwardProtection = null;
+    if (fwdSettingsNow().protect != null) {
         syncDirectForwardToggle();
-    }).catch(() => {
-        globalForwardProtection = null;
-        if (cur?.token === token) syncDirectForwardToggle();
-    });
+    } else {
+        void api.get('/api/config').then((config) => {
+            globalForwardProtection = config?.forwarding?.protect === true;
+            if (cur?.token !== token) return;
+            setSwitch('fwd-protect-toggle', globalForwardProtection);
+            syncDirectForwardToggle();
+        }).catch(() => {
+            if (cur?.token === token) syncDirectForwardToggle();
+        });
+    }
 }
 
 /** The router is leaving the page — send any edit still waiting. */

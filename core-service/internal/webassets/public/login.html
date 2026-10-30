@@ -248,7 +248,7 @@
                 <i class="ri-login-circle-line align-middle mr-1.5"></i><span data-i18n="auth.sign_in">Sign in</span>
             </button>
 
-            <div id="error" role="alert" aria-atomic="true" class="hidden text-sm text-center"
+            <div id="error" role="alert" aria-atomic="true" class="hidden text-sm text-center" data-i18n="auth.invalid_password"
                 style="color: var(--tg-red); padding: 8px 12px; background: rgba(229,57,53,0.10); border-radius: 8px;">
                 Invalid password
             </div>
@@ -315,7 +315,9 @@
                 if (data.success) {
                     window.location.href = '/';
                 } else {
-                    errorDiv.textContent = data.error || window.t('auth.invalid_password');
+                    errorDiv.textContent = res.status === 401
+                        ? window.t('auth.invalid_password')
+                        : data.error || window.t('auth.invalid_password');
                     errorDiv.classList.remove('hidden');
                     btn.disabled = false;
                     label.textContent = window.t('auth.sign_in');

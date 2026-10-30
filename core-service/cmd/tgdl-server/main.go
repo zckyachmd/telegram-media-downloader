@@ -109,6 +109,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 		serveErr = serve(ctx, server)
 	} else {
 		mcpAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort))
+		if bindHost := strings.TrimSpace(os.Getenv("TGDL_MCP_BIND_HOST")); bindHost != "" {
+			mcpAddress = net.JoinHostPort(bindHost, strconv.Itoa(mcpPort))
+		}
 		log.Printf("tgdl MCP listening on %s", mcpAddress)
 		mcpServer := &http.Server{Addr: mcpAddress, Handler: a.MCPHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20}
 		serveErr = serveTogether(ctx, server, mcpServer)
