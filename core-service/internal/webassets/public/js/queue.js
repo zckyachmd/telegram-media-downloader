@@ -503,6 +503,7 @@ async function loadSnapshot() {
         scheduleStructuralRender();
     } catch (e) {
         if (e.status !== 401) {
+            forwardQueueData = { error: true };
             showToast(
                 i18nTf(
                     'queue.toast.snapshot_failed',
@@ -511,6 +512,7 @@ async function loadSnapshot() {
                 ),
                 'error',
             );
+            renderForwardQueue(forwardQueueData);
         }
     }
 }
@@ -525,14 +527,37 @@ function renderForwardQueue(data) {
         ? item.status !== 'not_applicable'
         : ['pending', 'processing', 'failed', 'interrupted'].includes(item.status));
     const actionableCount = Number(data.pending || 0) + Number(data.active || 0) + Number(data.failed || 0) + Number(data.interrupted || 0);
+    const retryableCount = Number(data.failed || 0) + Number(data.interrupted || 0);
     const pageCount = Math.max(1, Math.ceil(actionableCount / FORWARD_PAGE_SIZE));
     forwardQueuePage = Math.min(Math.max(1, Number(data.page) || forwardQueuePage), pageCount);
     const totalEl = document.getElementById('queue-forward-total');
     if (totalEl) totalEl.textContent = i18nTf('queue.forward.total', { count: actionableCount }, `${actionableCount} actionable jobs`);
+    for (const [key, value] of Object.entries({ pending: data.pending, active: data.active, failed: data.failed, interrupted: data.interrupted })) {
+        const count = document.getElementById(`queue-forward-${key}`);
+        if (count) count.textContent = Number(value || 0).toLocaleString();
+    }
+    const retryAll = document.getElementById('queue-forward-retry-all');
+    if (retryAll) {
+        retryAll.disabled = retryableCount === 0;
+        const label = i18nTf('queue.forward.retry_all_button', { count: retryableCount }, `Retry failed & interrupted (${retryableCount})`);
+        retryAll.querySelector('span').textContent = label;
+        retryAll.setAttribute('aria-label', label);
+    }
+    if (data.loading) {
+        rows.innerHTML = `<p class="py-3 text-sm text-tg-textSecondary" role="status">${escapeHtml(i18nT('queue.forward.loading', 'Loading forward queue…'))}</p>`;
+        return;
+    }
+    if (data.error) {
+        rows.innerHTML = `<div class="flex flex-col items-start gap-2 py-4 sm:flex-row sm:items-center sm:justify-between" role="alert">
+            <p class="text-sm text-tg-text">${escapeHtml(i18nT('queue.forward.load_error', 'Could not load forward jobs.'))}</p>
+            <button type="button" class="tg-btn tg-btn-sm min-h-11" data-forward-reload>${escapeHtml(i18nT('queue.forward.reload', 'Try loading again'))}</button>
+        </div>`;
+        return;
+    }
     if (!items.length) {
         const emptyKey = forwardOnly ? 'queue.forward.empty' : 'queue.forward.empty_pending';
         const emptyFallback = forwardOnly ? 'No forward jobs recorded' : 'No jobs are waiting to be forwarded';
-        rows.innerHTML = `<p class="py-3 text-xs text-tg-textSecondary">${escapeHtml(i18nT(emptyKey, emptyFallback))}</p>`;
+        rows.innerHTML = `<p class="py-3 text-sm text-tg-textSecondary" role="status">${escapeHtml(i18nT(emptyKey, emptyFallback))}</p>`;
         return;
     }
     const start = (forwardQueuePage - 1) * FORWARD_PAGE_SIZE;
@@ -554,25 +579,34 @@ function renderForwardQueue(data) {
             : item.stage === 'fallback_upload'
                 ? i18nT('queue.forward.stage.fallback_upload', 'Uploading fallback')
                 : (item.stage || '—');
-        const reason = item.reason ? `<span class="text-red-400/80 truncate">${escapeHtml(item.reason)}</span>` : '';
-        const destinationsDetail = (item.destinationStates || []).map((d) => `${d.method || '—'} · ${d.status || 'pending'}${d.settings?.protect ? ' · protected' : ''}${d.directFailed ? ` · ${i18nT('queue.forward.direct_failed', 'Direct failed')}` : ''}`).join('; ');
-        const retry = ['failed', 'interrupted'].includes(item.status)
-            ? `<button type="button" class="tg-btn tg-btn-sm" data-forward-retry="${escapeHtml(item.id)}">${escapeHtml(i18nT('queue.forward.retry', 'Retry failed destinations'))}</button>`
+        const reason = item.reason ? `<p class="mt-1 text-xs text-red-400 break-words">${escapeHtml(item.reason)}</p>` : '';
+        const destinationStates = item.destinationStates || [];
+        const destinationsDetail = destinationStates.length > 1 || destinationStates.some((d) => d.settings?.protect || d.directFailed)
+            ? destinationStates.map((d) => `${d.method || '—'} · ${d.status || 'pending'}${d.settings?.protect ? ' · protected' : ''}${d.directFailed ? ` · ${i18nT('queue.forward.direct_failed', 'Direct failed')}` : ''}`).join('; ')
             : '';
-        return `<div class="py-2 text-xs flex flex-col sm:flex-row sm:items-center gap-x-3 gap-y-1">
-            <span class="min-w-0 flex-1"><span class="text-tg-text">${escapeHtml(item.fileName || `#${item.messageId}`)}</span>
-                <span class="text-tg-textSecondary"> · ${escapeHtml(group)} · #${escapeHtml(item.messageId)}</span></span>
-            <span class="text-tg-textSecondary truncate" title="${escapeHtml(destinations)}">${escapeHtml(i18nT('queue.forward.destination', 'To'))}: ${escapeHtml(destinations)}</span>
-            <span class="shrink-0 text-tg-textSecondary">${escapeHtml(status)} · ${escapeHtml(stage)}</span>${reason}
-            ${destinationsDetail ? `<span class="text-tg-textSecondary">${escapeHtml(destinationsDetail)}</span>` : ''}${retry}
-        </div>`;
+        const retry = ['failed', 'interrupted'].includes(item.status)
+            ? `<button type="button" class="tg-btn-secondary tg-btn-sm min-h-11" data-forward-retry="${escapeHtml(item.id)}">${escapeHtml(i18nT('queue.forward.retry', 'Retry'))}</button>`
+            : '';
+        const statusClass = item.status === 'failed' ? 'text-red-400' : 'text-tg-text';
+        return `<article class="grid grid-cols-1 gap-2 px-3 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div class="min-w-0">
+                <p class="truncate text-sm font-medium text-tg-text" title="${escapeHtml(item.fileName || `#${item.messageId}`)}">${escapeHtml(item.fileName || `#${item.messageId}`)}</p>
+                <p class="mt-1 text-xs text-tg-textSecondary">${escapeHtml(group)} · #${escapeHtml(item.messageId)}</p>
+                <p class="mt-1 truncate text-xs text-tg-textSecondary" title="${escapeHtml(destinations)}">${escapeHtml(i18nT('queue.forward.destination', 'To'))}: ${escapeHtml(destinations)}</p>
+                ${reason}${destinationsDetail ? `<p class="mt-1 text-xs text-tg-textSecondary">${escapeHtml(destinationsDetail)}</p>` : ''}
+            </div>
+            <div class="flex items-center justify-between gap-3 sm:justify-end">
+                <span class="min-w-0 text-xs"><span class="font-medium ${statusClass}">${escapeHtml(status)}</span><span class="text-tg-textSecondary"> · ${escapeHtml(stage)}</span></span>
+                ${retry}
+            </div>
+        </article>`;
     }).join('');
     if (pageCount > 1) {
         rows.insertAdjacentHTML('beforeend', `<div class="flex items-center justify-between gap-3 pt-3 text-xs text-tg-textSecondary">
             <span>${escapeHtml(i18nTf('queue.forward.page', { start: start + 1, end: Math.min(start + FORWARD_PAGE_SIZE, actionableCount), total: actionableCount }, `${start + 1}–${Math.min(start + FORWARD_PAGE_SIZE, actionableCount)} of ${actionableCount}`))}</span>
             <div class="flex gap-2">
-                <button type="button" class="tg-btn tg-btn-sm" data-forward-page="prev" ${forwardQueuePage <= 1 ? 'disabled' : ''}>${escapeHtml(i18nT('common.prev', 'Prev'))}</button>
-                <button type="button" class="tg-btn tg-btn-sm" data-forward-page="next" ${forwardQueuePage >= pageCount ? 'disabled' : ''}>${escapeHtml(i18nT('common.next', 'Next'))}</button>
+                <button type="button" class="tg-btn tg-btn-sm min-h-11" data-forward-page="prev" ${forwardQueuePage <= 1 ? 'disabled' : ''}>${escapeHtml(i18nT('common.prev', 'Prev'))}</button>
+                <button type="button" class="tg-btn tg-btn-sm min-h-11" data-forward-page="next" ${forwardQueuePage >= pageCount ? 'disabled' : ''}>${escapeHtml(i18nT('common.next', 'Next'))}</button>
             </div>
         </div>`);
     }
@@ -797,6 +831,40 @@ function handleWs(msg) {
 }
 
 document.addEventListener('click', async (event) => {
+    const retryAll = event.target.closest('[data-forward-retry-all]');
+    if (retryAll) {
+        const count = Number(forwardQueueData?.failed || 0) + Number(forwardQueueData?.interrupted || 0);
+        if (!count) return;
+        retryAll.disabled = true;
+        if (!(await confirmSheet({
+            title: i18nT('queue.forward.retry_all_title', 'Retry failed or interrupted forward jobs?'),
+            message: i18nTf(
+                'queue.forward.retry_all_confirm',
+                { count },
+                `This will return ${count} failed or interrupted jobs to the forward queue. Make sure the engine is running first.`,
+            ),
+            confirmLabel: i18nT('queue.forward.retry_all_confirm_button', 'Retry all'),
+        }))) {
+            retryAll.disabled = false;
+            return;
+        }
+        try {
+            const result = await api.post('/api/forward-queue/retry-all', {});
+            const retried = Number(result?.retried || 0);
+            showToast(i18nTf('queue.forward.retry_all_done', { count: retried }, `Queued ${retried} forward retries`), 'success');
+            await loadSnapshot();
+        } catch (error) {
+            showToast(error?.message || 'Retry failed', 'error');
+            retryAll.disabled = false;
+        }
+        return;
+    }
+    const reloadForward = event.target.closest('[data-forward-reload]');
+    if (reloadForward) {
+        renderForwardQueue({ loading: true });
+        await loadSnapshot();
+        return;
+    }
     const button = event.target.closest('[data-forward-retry]');
     if (!button) return;
     button.disabled = true;
@@ -1836,7 +1904,10 @@ export async function showQueuePage(params = {}) {
         }
     }
     if (forwardOnly) selectionClear();
-    if (!view.booted) await loadSnapshot();
+    if (!view.booted) {
+        if (forwardOnly) renderForwardQueue({ loading: true });
+        await loadSnapshot();
+    }
     else if (isForwardRoute && Number(forwardQueueData.page) > 1) {
         try {
             renderForwardQueue(await api.get('/api/forward-queue?page=1'));

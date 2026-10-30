@@ -386,6 +386,51 @@ func TestForwardQueueRetryResetsFailedAndInterruptedJobs(t *testing.T) {
 	}
 }
 
+func TestForwardQueueRetryAllOnlyResetsFailedAndInterruptedJobs(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_queue_state SET paused=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]int64)
+	for _, status := range []string{"failed", "interrupted", "forwarded", "pending"} {
+		var id int64
+		if err := a.db.Writer.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,status,reason,stage,destinations_json,created_at,updated_at,completed_at)
+			VALUES('-1000000000123','Source',?,?,?,'upload','[]',1,1,1) RETURNING id`, len(ids)+1, status, "temporary failure").Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		ids[status] = id
+	}
+	w := httptest.NewRecorder()
+	a.handleForwardQueueRetryAll(w, httptest.NewRequest(http.MethodPost, "/api/forward-queue/retry-all", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("retry-all status=%d body=%s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Retried int64 `json:"retried"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Retried != 2 {
+		t.Fatalf("retried=%d, want 2", response.Retried)
+	}
+	for status, id := range ids {
+		var gotStatus, reason string
+		var completedAt int64
+		if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,reason,completed_at FROM tgdl_forward_queue WHERE id=?`, id).Scan(&gotStatus, &reason, &completedAt); err != nil {
+			t.Fatal(err)
+		}
+		wantStatus, wantReason, wantCompleted := status, "temporary failure", int64(1)
+		if status == "failed" || status == "interrupted" {
+			wantStatus, wantReason, wantCompleted = "pending", "", 0
+		}
+		if gotStatus != wantStatus || reason != wantReason || completedAt != wantCompleted {
+			t.Fatalf("status %q became status=%q reason=%q completedAt=%d, want %q %q %d", status, gotStatus, reason, completedAt, wantStatus, wantReason, wantCompleted)
+		}
+	}
+}
+
 func TestForwardQueueSnapshotIncludesAllRetryableJobs(t *testing.T) {
 	ctx := context.Background()
 	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})

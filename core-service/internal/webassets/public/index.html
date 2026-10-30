@@ -1731,12 +1731,40 @@
                         <div id="queue-chips" class="queue-chip-row" role="toolbar" data-i18n-aria-label="queue.chips_label" aria-label="Filter queue jobs"></div>
                     </section>
                     <section id="queue-forward-panel" class="hidden bg-tg-panel rounded-xl p-3 mb-3" aria-labelledby="queue-forward-heading">
-                        <h2 id="queue-forward-heading" class="text-sm font-medium text-tg-text flex items-center gap-2 mb-2">
-                            <i class="ri-send-plane-line text-tg-blue" aria-hidden="true"></i>
-                            <span data-i18n="queue.forward.group">Forward</span>
-                            <span id="queue-forward-total" class="ml-auto text-xs text-tg-textSecondary" aria-live="polite"></span>
-                        </h2>
-                        <div id="queue-forward-items" class="divide-y divide-tg-border/30"></div>
+                        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
+                            <div class="min-w-0">
+                                <h2 id="queue-forward-heading" class="text-sm font-medium text-tg-text flex items-center gap-2">
+                                    <i class="ri-send-plane-line text-tg-blue" aria-hidden="true"></i>
+                                    <span data-i18n="queue.forward.group">Forward</span>
+                                </h2>
+                                <p id="queue-forward-total" class="mt-1 text-xs text-tg-textSecondary" aria-live="polite"></p>
+                            </div>
+                            <button id="queue-forward-retry-all" type="button" class="tg-btn tg-btn-sm min-h-11 shrink-0" data-forward-retry-all disabled>
+                                <i class="ri-restart-line mr-1" aria-hidden="true"></i>
+                                <span data-i18n="queue.forward.retry_all_button">Retry failed &amp; interrupted (0)</span>
+                            </button>
+                        </div>
+                        <dl id="queue-forward-summary" class="grid grid-cols-2 sm:grid-cols-4 border-y border-tg-border/40 mb-2" data-i18n-aria-label="queue.forward.summary" aria-label="Forward queue status">
+                            <div class="py-2 pr-3">
+                                <dt class="text-xs text-tg-textSecondary" data-i18n="queue.forward.count.pending">Pending</dt>
+                                <dd id="queue-forward-pending" class="mt-0.5 text-base font-semibold tabular-nums text-tg-text">0</dd>
+                            </div>
+                            <div class="py-2 px-3 border-l border-tg-border/40">
+                                <dt class="text-xs text-tg-textSecondary" data-i18n="queue.forward.count.active">Active</dt>
+                                <dd id="queue-forward-active" class="mt-0.5 text-base font-semibold tabular-nums text-tg-text">0</dd>
+                            </div>
+                            <div class="py-2 pr-3 sm:px-3 sm:border-l border-tg-border/40">
+                                <dt class="text-xs text-tg-textSecondary" data-i18n="queue.forward.count.failed">Failed</dt>
+                                <dd id="queue-forward-failed" class="mt-0.5 text-base font-semibold tabular-nums text-red-400">0</dd>
+                            </div>
+                            <div class="py-2 px-3 border-l border-tg-border/40">
+                                <dt class="text-xs text-tg-textSecondary" data-i18n="queue.forward.count.interrupted">Interrupted</dt>
+                                <dd id="queue-forward-interrupted" class="mt-0.5 text-base font-semibold tabular-nums text-tg-text">0</dd>
+                            </div>
+                        </dl>
+                        <div id="queue-forward-items" class="divide-y divide-tg-border/30" aria-live="polite">
+                            <p class="py-3 text-sm text-tg-textSecondary" role="status" data-i18n="queue.forward.loading">Loading forward queue…</p>
+                        </div>
                     </section>
                     <div id="queue-download-panel">
                     <!-- Top toolbar — status chips (one scrollable row; the default

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.21] — 2026-10-30
+
+### Added
+- Forward queue now supports a confirmed bulk retry for failed and interrupted jobs, with status counts and clearer per-job details.
+
+### Service worker
+- `VERSION = 'v34200'`
+
 ## [3.4.20] — 2026-10-30
 
 ### Fixed

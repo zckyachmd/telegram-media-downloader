@@ -298,6 +298,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	mux.Handle("POST /api/downloads/pin", a.requireAdmin(http.HandlerFunc(a.handleBatchPin)))
 	mux.Handle("POST /api/downloads/{id}/pin", a.requireAdmin(http.HandlerFunc(a.handlePin)))
 	mux.Handle("POST /api/forward-queue", a.requireAdmin(http.HandlerFunc(a.handleManualForwardEnqueue)))
+	mux.Handle("POST /api/forward-queue/retry-all", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueRetryAll)))
 	mux.Handle("POST /api/forward-queue/{id}/retry", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueRetry)))
 	mux.Handle("PUT /api/forwarding/default-protection", a.requireAdmin(http.HandlerFunc(a.handleGlobalForwardProtection)))
 	mux.Handle("GET /api/jobs", a.requireSession(http.HandlerFunc(a.handleJobs)))

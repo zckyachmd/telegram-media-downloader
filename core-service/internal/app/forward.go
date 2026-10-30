@@ -519,6 +519,27 @@ func (a *App) handleForwardQueueRetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
+func (a *App) handleForwardQueueRetryAll(w http.ResponseWriter, r *http.Request) {
+	res, err := a.db.Writer.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status='pending',reason='',completed_at=0,updated_at=? WHERE status IN ('failed','interrupted')`, time.Now().UnixMilli())
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	retried, err := res.RowsAffected()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if retried > 0 {
+		a.notifyForwardQueue()
+		select {
+		case a.forwards <- struct{}{}:
+		default:
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "retried": retried})
+}
+
 func (a *App) finishForwardQueue(ctx context.Context, job forwardJob, status, reason string) {
 	if job.queueID == 0 {
 		return
