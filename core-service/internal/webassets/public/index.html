@@ -1730,6 +1730,14 @@
                     <section class="bg-tg-panel rounded-xl p-3 mb-3">
                         <div id="queue-chips" class="queue-chip-row" role="toolbar" data-i18n-aria-label="queue.chips_label" aria-label="Filter queue jobs"></div>
                     </section>
+                    <section id="queue-forward-panel" class="hidden bg-tg-panel rounded-xl p-3 mb-3" aria-labelledby="queue-forward-heading">
+                        <h2 id="queue-forward-heading" class="text-sm font-medium text-tg-text flex items-center gap-2 mb-2">
+                            <i class="ri-send-plane-line text-tg-blue" aria-hidden="true"></i>
+                            <span data-i18n="queue.forward.group">Forward</span>
+                        </h2>
+                        <div id="queue-forward-items" class="divide-y divide-tg-border/30"></div>
+                    </section>
+                    <div id="queue-download-panel">
                     <!-- Top toolbar — status chips (one scrollable row; the default
                          "Active" view shows downloading + queued + paused), then
                          search, sort and the ⋮ menu (speed limit, and the global
@@ -1902,6 +1910,7 @@
                     <section class="bg-tg-panel rounded-xl p-3 mt-3 flex flex-wrap items-center gap-3">
                         <div id="queue-aggregate" class="text-xs text-tg-textSecondary tabular-nums flex items-center gap-3 flex-wrap"></div>
                     </section>
+                    </div>
                 </div>
 
                 <!-- Tools group page (admin-only) — #/settings/tools/<group>.

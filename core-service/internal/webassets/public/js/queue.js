@@ -46,12 +46,12 @@ const RENDER_COALESCE_MS = 60; // collapse WS bursts into one rAF tick
 // downloader flagged as duplicates) — surfaces the rows that produced no
 // new bytes on disk, so the operator can see "what got skipped today".
 const STATUS_FILTERS = [
-    // Active downloads plus durable forward jobs are shown in the Active view.
+    // Download statuses stay separate from the durable forward queue.
     {
         id: 'current',
         i18n: 'queue.chip.current',
         fallback: 'Active',
-        match: (j) => j.status === 'active' || j.status === 'queued' || ['pending', 'processing'].includes(j.forwardStatus),
+        match: (j) => j.status === 'active' || j.status === 'queued',
     },
     {
         id: 'failed',
@@ -132,7 +132,7 @@ let forwardOnly = false;
 
 // View state — survives across navigations to the same page.
 const view = {
-    filter: 'current', // active/queued downloads and pending/processing forwards
+    filter: 'current', // active/queued downloads
     sort: 'addedAt', // 'addedAt' | 'size' | 'progress' | 'group' | 'filename'
     sortDir: 'desc',
     search: '',
@@ -515,6 +515,7 @@ async function loadSnapshot() {
 
 function renderForwardQueue(data) {
     forwardQueueData = data;
+    syncQueueSections();
     const rows = document.getElementById('queue-forward-items');
     if (!rows) return;
     const allItems = data.items || [];
@@ -558,6 +559,16 @@ function renderForwardQueue(data) {
             ${destinationsDetail ? `<span class="text-tg-textSecondary">${escapeHtml(destinationsDetail)}</span>` : ''}${retry}
         </div>`;
     }).join('');
+}
+
+function syncQueueSections() {
+    const downloadPanel = document.getElementById('queue-download-panel');
+    const forwardPanel = document.getElementById('queue-forward-panel');
+    if (downloadPanel) downloadPanel.classList.toggle('hidden', forwardOnly);
+    if (forwardPanel) {
+        const hasWork = ['pending', 'active', 'failed', 'interrupted'].some((key) => Number(forwardQueueData[key]) > 0);
+        forwardPanel.classList.toggle('hidden', !forwardOnly && !hasWork);
+    }
 }
 
 // ============ WS handlers ============
@@ -839,20 +850,22 @@ function _chipCounts() {
     // (O(n), n bounded by MAX_FINISHED + live jobs). Without this the
     // "Duplicate" chip always showed 0 even when rows carried the badge.
     let dupe = 0;
+    let done = 0;
     for (const j of store.values()) {
         if (j.deduped === true) dupe += 1;
+        if (j.status === 'done' && !['pending', 'processing'].includes(j.forwardStatus)) done += 1;
     }
     const active = monitorCounts.active;
     const queued = monitorCounts.queue;
     return {
-        current: active + queued + monitorCounts.forward,
+        current: active + queued,
         all: store.size,
         active,
         queued,
         forwarding: monitorCounts.forward,
         paused: statusCounts.get('paused') || 0,
         failed: statusCounts.get('failed') || 0,
-        done: statusCounts.get('done') || 0,
+        done,
         dupe,
     };
 }
@@ -882,11 +895,13 @@ function renderChips() {
             const forwardBtn = ev.target.closest('[data-forward-view]');
             if (forwardBtn && host.contains(forwardBtn)) {
                 forwardOnly = true;
+                selectionClear();
                 if (view.filter !== 'current') {
                     view.filter = 'current';
                     invalidateFilterCache();
-                    renderRows();
                 }
+                syncQueueSections();
+                renderRows();
                 const target = '#/queue/forward';
                 if (location.hash !== target) history.pushState(null, '', target);
                 renderChips();
@@ -896,6 +911,7 @@ function renderChips() {
             const btn = ev.target.closest('[data-chip]');
             if (!btn || !host.contains(btn)) return;
             forwardOnly = false;
+            syncQueueSections();
             view.filter = btn.dataset.chip;
             invalidateFilterCache();
             const target =
@@ -1783,8 +1799,12 @@ export async function showQueuePage(params = {}) {
         if (status && STATUS_FILTERS.some((f) => f.id === status)) {
             view.filter = status;
             invalidateFilterCache();
+        } else if (!status) {
+            view.filter = 'current';
+            invalidateFilterCache();
         }
     }
+    if (forwardOnly) selectionClear();
     if (!view.booted) await loadSnapshot();
     wireOnce();
     bindThrottleSlider();
