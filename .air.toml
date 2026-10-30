@@ -20,7 +20,7 @@ time = true
 clean_on_exit = true
 
 [proxy]
-enabled = true
+enabled = false
 proxy_port = 3002
 app_port = 3003
 app_start_timeout = 30000

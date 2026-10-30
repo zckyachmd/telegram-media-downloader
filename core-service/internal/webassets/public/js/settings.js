@@ -973,7 +973,7 @@ export function loadAdvanced(config) {
     set('setting-adv-forward-queue-size', f.queueSize);
     set('setting-adv-forward-interval-sec', f.intervalSec);
     set('setting-adv-forward-flood-attempts', f.floodWaitAttempts);
-    set('setting-forward-protect-default', cfg.forwarding?.protect === true);
+    set('setting-forward-protect-default', config.forwarding?.protect === true);
 
     const h = { ...ADVANCED_DEFAULTS.history, ...(adv.history || {}) };
     set('setting-adv-backpressure', h.backpressureCap);

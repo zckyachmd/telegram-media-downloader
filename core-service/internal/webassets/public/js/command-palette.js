@@ -102,6 +102,12 @@ function pageItems() {
                 hint: i18nT('nav.settings', 'Settings'),
                 words: 'maintenance admin',
             }),
+            item('pages', 'MCP agent access', 'MCP agent access', {
+                icon: 'ri-shield-keyhole-line',
+                href: '#/settings/mcp',
+                hint: i18nT('nav.settings', 'Settings'),
+                words: 'agents permissions scopes approvals audit tokens',
+            }),
         );
     }
     return out;

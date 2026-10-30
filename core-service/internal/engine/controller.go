@@ -307,6 +307,17 @@ func (s *DialogSession) ForumTopics(ctx context.Context, groupID string) ([]tele
 	return nil, errors.New("no connected account can read topics for this group")
 }
 
+func (s *DialogSession) ChatAccount(ctx context.Context, accountID string) (telegram.ChatOperator, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	account, ok := s.run.accounts[accountID].(telegram.ChatOperator)
+	if !ok {
+		return nil, errors.New("selected connected account does not support chat operations")
+	}
+	return account, nil
+}
+
 func dialogAccessPriority(state string) int {
 	switch state {
 	case "ok":

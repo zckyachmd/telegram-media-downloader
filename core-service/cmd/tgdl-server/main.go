@@ -80,7 +80,22 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, Restart: stop, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: devMode})
+	mcpDisabled := os.Getenv("TGDL_MCP_DISABLED") == "1"
+	mcpPort := 3001
+	if !mcpDisabled {
+		if raw := strings.TrimSpace(os.Getenv("TGDL_MCP_PORT")); raw != "" {
+			mcpPort, err = strconv.Atoi(raw)
+			if err != nil || mcpPort < 1 || mcpPort > 65535 {
+				_, _ = fmt.Fprintln(stderr, "TGDL_MCP_PORT must be between 1 and 65535")
+				return 2
+			}
+		}
+	}
+	mcpIssuer := strings.TrimRight(strings.TrimSpace(os.Getenv("TGDL_MCP_ISSUER")), "/")
+	if mcpIssuer == "" {
+		mcpIssuer = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort))
+	}
+	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, Restart: stop, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: devMode, MCPIssuer: mcpIssuer})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1
@@ -88,7 +103,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	address := net.JoinHostPort(cfg.BindHost, strconv.Itoa(cfg.Port))
 	log.Printf("tgdl-server listening on %s", address)
 	server := &http.Server{Addr: address, Handler: a.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20}
-	serveErr := serve(ctx, server)
+	var serveErr error
+	if mcpDisabled {
+		log.Printf("MCP listener disabled")
+		serveErr = serve(ctx, server)
+	} else {
+		mcpAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort))
+		log.Printf("tgdl MCP listening on %s", mcpAddress)
+		mcpServer := &http.Server{Addr: mcpAddress, Handler: a.MCPHandler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20}
+		serveErr = serveTogether(ctx, server, mcpServer)
+	}
 	closeErr := a.Close()
 	if err = errors.Join(serveErr, closeErr); err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
@@ -114,6 +138,24 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_ = child.Process.Release()
 	}
 	return 0
+}
+
+func serveTogether(ctx context.Context, servers ...*http.Server) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan error, len(servers))
+	for _, server := range servers {
+		go func(server *http.Server) { done <- serve(runCtx, server) }(server)
+	}
+	var errs []error
+	for range servers {
+		err := <-done
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errs = append(errs, err)
+			cancel()
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func serve(ctx context.Context, server *http.Server) error {

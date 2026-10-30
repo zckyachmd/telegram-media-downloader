@@ -928,6 +928,9 @@ function navigateTo(page, opts) {
 }
 
 function renderPage(page, params = {}) {
+    if (state.currentPage === 'settings' && page !== 'settings' && state.role === 'admin') {
+        import('./mcp-control.js').then((m) => m.clearOneTimeSecret()).catch(() => {});
+    }
     // Per-page teardown: stop background tickers/listeners owned by the
     // page we're leaving so they don't keep running invisible.
     if (state.currentPage === 'backfill' && page !== 'backfill') {
@@ -1025,6 +1028,9 @@ function renderPage(page, params = {}) {
             import('./tools-hub.js')
                 .then((m) => m.initToolsCard())
                 .catch((e) => console.error('tools card', e));
+            import('./mcp-control.js')
+                .then((m) => m.initMCPControl())
+                .catch((e) => console.error('MCP controls', e));
         }
         // Engine controls live in the admin-only System section; guests
         // never see the card, and `initEngine` polls /api/monitor/status

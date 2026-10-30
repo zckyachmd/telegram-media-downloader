@@ -27,6 +27,7 @@ import (
 	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/jobs"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/mcpcontrol"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/store"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
@@ -47,6 +48,7 @@ type Config struct {
 	DevMode             bool
 	Output              io.Writer
 	Restart             func()
+	MCPIssuer           string
 }
 type App struct {
 	devMode           bool
@@ -94,6 +96,8 @@ type App struct {
 	jobs                 *jobs.Tracker
 	dataDir              string
 	cluster              cluster.Store
+	mcpControl           *mcpcontrol.Store
+	mcpIssuer            string
 	clusterHTTP          *cluster.Client
 	clusterMu            sync.Mutex
 	clusterWG            sync.WaitGroup
@@ -210,6 +214,23 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		release()
 		return nil, err
 	}
+	mcpKey, err := mcpcontrol.LoadOrCreateKey(cfg.DataDir)
+	if err != nil {
+		_ = db.Reader.Close()
+		_ = db.Writer.Close()
+		release()
+		return nil, err
+	}
+	mcpControl, err := mcpcontrol.New(db.Writer, mcpKey)
+	for i := range mcpKey {
+		mcpKey[i] = 0
+	}
+	if err != nil {
+		_ = db.Reader.Close()
+		_ = db.Writer.Close()
+		release()
+		return nil, err
+	}
 	cookie := cfg.CookieName
 	if cookie == "" {
 		cookie = "tg_dl_session"
@@ -219,7 +240,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		ttl = 7 * 24 * time.Hour
 	}
 	read := dbread.NewHandler(filepath.Join(cfg.DataDir, "db.sqlite"), nil)
-	a := &App{devMode: cfg.DevMode, db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("updateStatus"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbsRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
+	a := &App{devMode: cfg.DevMode, db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, mcpControl: mcpControl, mcpIssuer: cfg.MCPIssuer, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("updateStatus"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbsRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
 	a.restart = cfg.Restart
 	a.httpOptions, a.proxyPolicy, a.apiRL = cfg.HTTP, proxy, newRateLimiter(10000, time.Minute)
 	a.seekbar = newSeekbarState()
@@ -308,6 +329,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	registerPurgeRoutes(mux, a)
 	registerRecoveryRoutes(mux, a)
 	registerConfigWriteRoutes(mux, a)
+	registerMCPAdminRoutes(mux, a)
 	registerMediaRoutes(mux, a)
 	registerArchiveRoutes(mux, a)
 	registerBackupRoutes(mux, a)
@@ -604,6 +626,9 @@ func (a *App) Close() error {
 		}
 		if a.read != nil {
 			a.read.Close()
+		}
+		if a.mcpControl != nil {
+			a.mcpControl.Close()
 		}
 		if a.db != nil {
 			if a.db.Reader != nil {
