@@ -1028,9 +1028,6 @@ function renderPage(page, params = {}) {
             import('./tools-hub.js')
                 .then((m) => m.initToolsCard())
                 .catch((e) => console.error('tools card', e));
-            import('./mcp-control.js')
-                .then((m) => m.initMCPControl())
-                .catch((e) => console.error('MCP controls', e));
         }
         // Engine controls live in the admin-only System section; guests
         // never see the card, and `initEngine` polls /api/monitor/status
@@ -1187,6 +1184,11 @@ function renderPage(page, params = {}) {
         import('./maintenance-logs.js')
             .then((m) => m.init())
             .catch((e) => console.error('maintenance-logs', e));
+        if (state.role === 'admin') {
+            import('./mcp-control.js')
+                .then((m) => m.initMCPControl())
+                .catch((e) => console.error('MCP controls', e));
+        }
     } else if (page === 'maintenance-backup') {
         _setPageText('title', 'maintenance.backup.page_title', 'Backup destinations');
         _setPageText(

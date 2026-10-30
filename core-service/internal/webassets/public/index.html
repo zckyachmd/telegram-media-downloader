@@ -753,10 +753,6 @@
                             <i class="ri-tools-line" aria-hidden="true"></i>
                             <span data-i18n="tools.title">Tools</span>
                         </button>
-                        <button type="button" role="tab" data-admin-only class="settings-chip" data-chip="mcp" aria-selected="false">
-                            <i class="ri-shield-keyhole-line" aria-hidden="true"></i>
-                            <span>MCP access</span>
-                        </button>
                         <button type="button" role="tab" data-admin-only class="settings-chip" data-chip="card-accounts" aria-selected="false">
                             <i class="ri-user-line" aria-hidden="true"></i>
                             <span data-i18n="settings.accounts">Accounts</span>
@@ -887,28 +883,6 @@
                         <div id="tools-attention" class="tools-attention" aria-live="polite"></div>
                         <div id="tools-groups" class="tools-groups"></div>
                     </div>
-
-                    <section id="settings-mcp" data-settings-section="mcp" class="bg-tg-panel rounded-xl p-4 mb-6 scroll-mt-24" data-admin-only>
-                        <header class="flex items-start justify-between gap-3 flex-wrap mb-2">
-                            <div>
-                                <h3 class="text-tg-text text-base font-semibold flex items-center gap-2">
-                                    <i class="ri-shield-keyhole-line text-tg-blue" aria-hidden="true"></i>
-                                    <span>MCP agent access</span>
-                                </h3>
-                            </div>
-                            <div class="flex items-center gap-2">
-                                <button type="button" id="mcp-create-agent" class="tg-btn-input mcp-header-action mcp-create-button" hidden>
-                                    <i class="ri-add-line" aria-hidden="true"></i><span>Create agent</span>
-                                </button>
-                                <button type="button" id="mcp-refresh" aria-label="Refresh MCP data" aria-busy="false" class="tg-btn-secondary mcp-header-action">
-                                <i class="ri-refresh-line" aria-hidden="true"></i><span aria-live="polite">Refresh</span>
-                                </button>
-                            </div>
-                        </header>
-                        <div id="mcp-control" aria-live="polite" aria-busy="true">
-                            <div class="text-sm text-tg-textSecondary" role="status">Loading MCP controls…</div>
-                        </div>
-                    </section>
 
                     <!-- Advanced (runtime tunables) — collapsed by default in v2.9.
                          Power-user settings — every value here was a hardcoded
@@ -3638,6 +3612,11 @@
                 <div id="page-maintenance-logs" class="hidden max-w-5xl mx-auto px-3 sm:px-4" data-admin-only
                      data-page-title-key="maintenance.logs.page_title"
                      data-page-subtitle-key="maintenance.logs.subtitle">
+                    <div class="mcp-access-tabs mb-3" role="tablist" aria-label="Log sections">
+                        <button type="button" role="tab" id="logs-tab-server" class="mcp-access-tab" data-logs-view="server" aria-controls="logs-panel-server" aria-selected="true">Server logs</button>
+                        <button type="button" role="tab" id="logs-tab-mcp" class="mcp-access-tab" data-logs-view="mcp" aria-controls="logs-panel-mcp" aria-selected="false">MCP access</button>
+                    </div>
+                    <div id="logs-panel-server" role="tabpanel" aria-labelledby="logs-tab-server" data-logs-panel="server">
                     <section class="bg-tg-panel rounded-xl p-4 mb-3">
                         <div class="flex items-start justify-between gap-3 flex-wrap">
                             <div class="min-w-0">
@@ -3728,6 +3707,19 @@
                              pair drop the bottom rows below the nav bar). -->
                         <pre id="logs-stream" class="bg-tg-bg/60 p-3 text-[11px] font-mono whitespace-pre overflow-auto leading-snug" style="height: clamp(240px, calc(100vh - 320px), 70vh); height: clamp(240px, calc(100dvh - 320px), 70dvh);" role="log" aria-live="polite" aria-atomic="false" aria-label="Realtime server log"></pre>
                     </section>
+                    </div>
+                    <div id="logs-panel-mcp" role="tabpanel" aria-labelledby="logs-tab-mcp" data-logs-panel="mcp" hidden>
+                        <section class="bg-tg-panel rounded-xl p-4 mb-3">
+                            <header class="flex items-start justify-between gap-3 flex-wrap mb-2">
+                                <h2 class="text-tg-text text-base font-semibold flex items-center gap-2"><i class="ri-shield-keyhole-line text-tg-blue" aria-hidden="true"></i><span>MCP agent access</span></h2>
+                                <div class="flex items-center gap-2">
+                                    <button type="button" id="mcp-create-agent" class="tg-btn-input mcp-header-action mcp-create-button" hidden><i class="ri-add-line" aria-hidden="true"></i><span>Create agent</span></button>
+                                    <button type="button" id="mcp-refresh" aria-label="Refresh MCP data" aria-busy="false" class="tg-btn-secondary mcp-header-action"><i class="ri-refresh-line" aria-hidden="true"></i><span aria-live="polite">Refresh</span></button>
+                                </div>
+                            </header>
+                            <div id="mcp-control" aria-live="polite" aria-busy="true"><div class="text-sm text-tg-textSecondary" role="status">Loading MCP controls…</div></div>
+                        </section>
+                    </div>
                 </div>
 
                 <!-- Maintenance / Backup page (admin-only) -->
