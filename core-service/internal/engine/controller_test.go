@@ -185,7 +185,7 @@ func TestStopCancelsAccountStartupPromptly(t *testing.T) {
 		return Target{}, true, nil
 	}
 	sink := func(context.Context, *Work, *tg.Message, telegram.MediaDownloader) error { return nil }
-	c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, Sink(sink), nil)
 	request, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	started := make(chan error, 1)
@@ -252,7 +252,7 @@ func TestAttemptDeadlineFailsButRefreshedFilterSkips(t *testing.T) {
 				<-ctx.Done()
 				return ctx.Err()
 			}
-			c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+			c := New(s.writer, s.reader, t.TempDir(), factory, filter, Sink(sink), nil)
 			c.attemptLimit = func(int64) time.Duration { return 10 * time.Millisecond }
 			if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 1, 1); err != nil {
 				t.Fatal(err)
@@ -283,7 +283,9 @@ func TestAttemptDeadlineFailsButRefreshedFilterSkips(t *testing.T) {
 				t.Fatal("disallowed replacement downloaded")
 			}
 			if !refresh && calls != 1 {
-				t.Fatalf("deadline attempts=%d", calls)
+				var storedError string
+				_ = s.reader.QueryRow(`SELECT error FROM tgdl_work`).Scan(&storedError)
+				t.Fatalf("deadline attempts=%d error=%s", calls, storedError)
 			}
 		})
 	}
@@ -324,7 +326,7 @@ func TestFloodWaitReschedulesWithoutSpendingAttempts(t *testing.T) {
 		calls.Add(1)
 		return fmt.Errorf("download: %w", &tgerr.Error{Code: 420, Type: "FLOOD_WAIT", Argument: 120})
 	}
-	c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, Sink(sink), nil)
 	started := time.Now()
 	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 1, 1); err != nil {
 		t.Fatal(err)
@@ -397,7 +399,7 @@ func TestScalerGrowsWorkersForALongQueueAndDropsOnFloodWait(t *testing.T) {
 		}
 		return ctx.Err()
 	}
-	c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, Sink(sink), nil)
 	c.SetScaling(Scaling{Min: 1, Max: 8, Interval: 20 * time.Millisecond})
 	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 2, 1); err != nil {
 		t.Fatal(err)
@@ -443,7 +445,7 @@ func TestChannelGapIsRepairedWithoutStoppingTheMonitor(t *testing.T) {
 		return Target{}, true, nil
 	}
 	sink := func(context.Context, *Work, *tg.Message, telegram.MediaDownloader) error { return nil }
-	c := New(s.writer, s.reader, t.TempDir(), factory, filter, sink, nil)
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, Sink(sink), nil)
 	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 1, 1); err != nil {
 		t.Fatal(err)
 	}

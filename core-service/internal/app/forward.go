@@ -925,7 +925,9 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 			settings = job.destinations[i].Settings
 		}
 		job.destinations[i].Settings = settings
-		if settings["protect"] == true {
+		if job.stage == "caption_edit_failed" && customCaption(settings) {
+			continue
+		} else if settings["protect"] == true {
 			needsUpload = true
 			needsSourceDownload = job.path == ""
 		} else if customCaption(settings) && !directCaptionEnabled {
@@ -945,12 +947,14 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 		a.forwardFailed(job, "", errors.New("this forwarding route requires a completed download"))
 		return
 	}
-	if needsUpload {
-		job.stage = "upload"
-	} else if job.path == "" {
-		job.stage = "native_forward"
-	} else {
-		job.stage = "upload"
+	if job.stage != "caption_edit_failed" {
+		if needsUpload {
+			job.stage = "upload"
+		} else if job.path == "" {
+			job.stage = "native_forward"
+		} else {
+			job.stage = "upload"
+		}
 	}
 	a.persistForwardProgress(ctx, job)
 	for i, route := range routes {
@@ -964,7 +968,7 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 			continue
 		}
 		job.destinations[i].Status = "processing"
-		directCaption := job.path == "" && directCaptionEnabled && customCaption(settings) && settings["protect"] != true
+		directCaption := job.stage == "caption_edit_failed" || job.path == "" && directCaptionEnabled && customCaption(settings) && settings["protect"] != true
 		if directCaption && job.destinations[i].DestinationMessageID > 0 {
 			job.destinations[i].Method = "caption_edit"
 		} else if directCaption {
@@ -1113,8 +1117,8 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		}
 		destWasBlocked = blocked
 	}
-	directCaption := job.path == "" && job.settings["directForward"] == true && job.settings["deleteAfterForward"] == true && customCaption(settings) && settings["protect"] != true
-	if (job.path == "" || job.stage == "native_forward") && (!customCaption(settings) || directCaption) && settings["protect"] != true && job.messageID > 0 {
+	directCaption := job.stage == "caption_edit_failed" || job.path == "" && job.settings["directForward"] == true && job.settings["deleteAfterForward"] == true && customCaption(settings) && settings["protect"] != true
+	if (job.path == "" || job.stage == "native_forward" || job.stage == "caption_edit_failed") && (!customCaption(settings) || directCaption) && settings["protect"] != true && job.messageID > 0 {
 		sender, ok := a.forwarder.(nativeForwardSender)
 		var directErr error
 		var destinationMessageID int

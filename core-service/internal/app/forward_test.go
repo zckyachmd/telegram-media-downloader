@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -60,7 +61,9 @@ func (f *fakeForwarder) ForwardMessage(_ context.Context, account string, req te
 	if account == "" {
 		account = "default"
 	}
-	f.sent = append(f.sent, sentFile{account: account, req: telegram.SendFileRequest{Destination: req.Destination}})
+	if !req.EditCaption {
+		f.sent = append(f.sent, sentFile{account: account, req: telegram.SendFileRequest{Destination: req.Destination}})
+	}
 	return account, 42, f.err
 }
 
@@ -335,21 +338,51 @@ func TestRetryCaptionEditUsesSavedDestinationMessageID(t *testing.T) {
 		"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
 		"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption",
 	})
+	settings := map[string]any{
+		"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
+		"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption",
+	}
 	a.forward(ctx, forwardJob{
 		groupID: "-1000000000123", groupName: "Source", messageID: 14, text: "source caption",
-		settings: map[string]any{
-			"enabled": true, "destination": "@Archive", "deleteAfterForward": true,
-			"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption",
-		},
-		stage: "caption_edit_failed",
+		settings: settings, stage: "caption_edit_failed", path: "already-downloaded.mp4",
 		destinations: []forwardDestination{{
 			Settings: map[string]any{"destination": "@Archive", "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption"},
 			Status:   "processing", DirectFailed: true, DestinationMessageID: 9001,
 		}},
 	})
 	requests := fake.forwards()
-	if len(requests) != 1 || requests[0].EditMessageID != 9001 || !requests[0].EditCaption || requests[0].MessageID != 14 {
-		t.Fatalf("retry requests=%+v", requests)
+	if len(requests) != 1 || requests[0].EditMessageID != 9001 || !requests[0].EditCaption || requests[0].MessageID != 14 || len(fake.calls()) != 0 {
+		t.Fatalf("retry requests=%+v calls=%+v", requests, fake.calls())
+	}
+}
+
+func TestForwardQueueRetryResetsFailedAndInterruptedJobs(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	for _, status := range []string{"failed", "interrupted"} {
+		t.Run(status, func(t *testing.T) {
+			var id int64
+			err := a.db.Writer.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,status,reason,stage,destinations_json,created_at,updated_at,completed_at)
+				VALUES('-1000000000123','Source',14,?,'temporary failure','upload','[{"status":"forwarded"}]',1,1,1) RETURNING id`, status).Scan(&id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest(http.MethodPost, "/api/forward-queue/1/retry", nil)
+			r.SetPathValue("id", strconv.FormatInt(id, 10))
+			w := httptest.NewRecorder()
+			a.handleForwardQueueRetry(w, r)
+			if w.Code != http.StatusOK {
+				t.Fatalf("retry status=%d body=%s", w.Code, w.Body.String())
+			}
+			var gotStatus, reason, stage, destinations string
+			var completedAt int64
+			if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,reason,stage,destinations_json,completed_at FROM tgdl_forward_queue WHERE id=?`, id).Scan(&gotStatus, &reason, &stage, &destinations, &completedAt); err != nil {
+				t.Fatal(err)
+			}
+			if gotStatus != "pending" || reason != "" || stage != "upload" || destinations != `[{"status":"forwarded"}]` || completedAt != 0 {
+				t.Fatalf("retry state=%q reason=%q stage=%q destinations=%s completedAt=%d", gotStatus, reason, stage, destinations, completedAt)
+			}
+		})
 	}
 }
 
@@ -366,6 +399,7 @@ func TestUnresolvedCustomCaptionWithoutMessageIDDoesNotRetryAsNewForward(t *test
 			"directForward": true, "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption",
 		},
 		stage: "caption_edit_failed",
+		path:  "already-downloaded.mp4",
 		destinations: []forwardDestination{{
 			Settings: map[string]any{"destination": "@Archive", "captionMode": "custom", "captionBase": "custom", "caption": "fixed caption"},
 			Status:   "processing", DirectFailed: true,
