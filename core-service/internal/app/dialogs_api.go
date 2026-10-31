@@ -50,7 +50,12 @@ func (a *App) handleDialogTopics(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		writeJSONError(w, http.StatusBadGateway, "Could not load forum topics: "+err.Error())
+		if a.output != nil {
+			fmt.Fprintf(a.output, "Telegram forum topics unavailable: %v\n", err)
+		}
+		// Underlying Telegram errors can contain resource identifiers.
+		// Keep per-account causes in server logs, not in the HTTP response.
+		writeJSONError(w, http.StatusBadGateway, "Could not load forum topics. Check connected account access and server logs.")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"topics": topics})
