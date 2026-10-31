@@ -245,6 +245,13 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_forward_queue_due ON tgdl_forward_queue(status,retry_at,id)`); err != nil {
 		return 0, err
 	}
+	// Match the actionable Queue UI's priority expression and id DESC ordering.
+	// A plain (status,id) index cannot satisfy ORDER BY CASE(status).
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_forward_queue_page ON tgdl_forward_queue(
+		(CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 WHEN 'uncertain' THEN 2 ELSE 3 END), id DESC
+	) WHERE status IN ('pending','processing','failed','interrupted','uncertain')`); err != nil {
+		return 0, fmt.Errorf("create forward queue pagination index: %w", err)
+	}
 	now := time.Now().UnixMilli()
 	if _, err := db.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status='uncertain',reason='server restarted while Telegram delivery outcome was unknown',updated_at=?,completed_at=? WHERE status='processing'`, now, now); err != nil {
 		return 0, err
