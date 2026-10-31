@@ -201,6 +201,15 @@ func (a *App) browseDialogs(ctx context.Context) ([]engine.Dialog, error) {
 func (a *App) browseDialogsRemote(ctx context.Context) ([]engine.Dialog, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
+	stage := "open"
+	var openDuration, listDuration, persistDuration time.Duration
+	count := 0
+	defer func() {
+		if a.output != nil {
+			fmt.Fprintf(a.output, "dialog listing stages: stage=%s open=%s list=%s persist=%s count=%d\n",
+				stage, openDuration, listDuration, persistDuration, count)
+		}
+	}()
 	phaseStart := time.Now()
 	// Pair startup with acquiring a run lease. Account changes, purge and the
 	// idle-job drain cannot slip between them. Release the operation lock before
@@ -218,7 +227,8 @@ func (a *App) browseDialogsRemote(ctx context.Context) ([]engine.Dialog, error) 
 		session, err = a.monitor.OpenDialogs(ctx)
 	}
 	a.monitorOp.Unlock()
-	openDuration := time.Since(phaseStart)
+	openDuration = time.Since(phaseStart)
+	if err == nil { stage = "list" }
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +239,9 @@ func (a *App) browseDialogsRemote(ctx context.Context) ([]engine.Dialog, error) 
 	// a readable account and incorrectly mark the chat unavailable.
 	phaseStart = time.Now()
 	dialogs, err := session.List(-1)
-	listDuration := time.Since(phaseStart)
+	listDuration = time.Since(phaseStart)
+	count = len(dialogs)
+	if err == nil { stage = "validate" }
 	if err != nil {
 		return nil, err
 	}
@@ -241,14 +253,13 @@ func (a *App) browseDialogsRemote(ctx context.Context) ([]engine.Dialog, error) 
 	if version != a.dialogVersion {
 		return nil, errors.New("chat list changed; refresh to load current chats")
 	}
+	stage = "persist"
 	phaseStart = time.Now()
 	if err := a.saveDialogAccess(ctx, dialogs, observedAt); err != nil {
 		return nil, err
 	}
-	persistDuration := time.Since(phaseStart)
-	if a.output != nil {
-		fmt.Fprintf(a.output, "dialog listing stages: open=%s list=%s persist=%s count=%d\n", openDuration, listDuration, persistDuration, len(dialogs))
-	}
+	persistDuration = time.Since(phaseStart)
+	stage = "done"
 	return dialogs, nil
 }
 
