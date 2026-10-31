@@ -502,9 +502,10 @@ function loadSnapshot() {
     if (_snapshotInFlight) return _snapshotInFlight;
     const request = fetchAndApplySnapshot();
     _snapshotInFlight = request;
-    void request.finally(() => {
+    const clear = () => {
         if (_snapshotInFlight === request) _snapshotInFlight = null;
-    });
+    };
+    void request.then(clear, clear);
     return request;
 }
 
