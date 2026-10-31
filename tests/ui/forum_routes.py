@@ -65,6 +65,7 @@ with sync_playwright() as p:
         id: String(-1000000 - i), name: 'Target ' + String(i).padStart(4, '0')
       }));
       window.routesHarness.setup();
+      document.addEventListener('click', onClick);
       const select = document.querySelector('[data-route-destination]');
       select.innerHTML = forwardGroupOptions('-10042');
       cacheSearchOptions(select);
