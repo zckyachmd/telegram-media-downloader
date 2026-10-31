@@ -58,5 +58,33 @@ with sync_playwright() as p:
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), f'overflow at {width}'
         page.locator('[data-forward-route]').evaluate('(el) => el.remove()')
         assert page.evaluate('routesHarness.collect()') == []
+    # Large monitored-chat destination search must remain bounded without
+    # dropping the canonical native select options or the chosen destination.
+    page.evaluate('''() => {
+      state.allDialogs = Array.from({length: 5000}, (_, i) => ({
+        id: String(-1000000 - i), name: 'Target ' + String(i).padStart(4, '0')
+      }));
+      window.routesHarness.setup();
+      const select = document.querySelector('[data-route-destination]');
+      select.innerHTML = forwardGroupOptions('-10042');
+      cacheSearchOptions(select);
+    }''')
+    result = page.evaluate('''() => {
+      const select = document.querySelector('[data-route-destination]');
+      const initial = select.options.length;
+      filterSearchOptions(select, 'Target');
+      const shown = document.querySelectorAll('[data-route-destination]')?.length;
+      const rendered = select.closest('[data-search-select]').querySelectorAll('[data-select-option]').length;
+      return {initial, after: select.options.length, rendered, selected: select.value};
+    }''')
+    assert result['initial'] > 5000, result
+    assert result['after'] == result['initial'], result
+    assert result['rendered'] == 100, result
+    assert result['selected'] == '-10042', result
+    page.evaluate('''() => {
+      const select = document.querySelector('[data-route-destination]');
+      filterSearchOptions(select, 'Target 4999');
+    }''')
+    assert page.locator('[data-select-option][data-select-option="-1004999"]').count() == 1
     browser.close()
-print('PASS: mobile/desktop route IDs and captions survive failed, empty and successful topic lookup; removing all routes saves an empty list')
+print('PASS: route preservation and 5000-dialog bounded search regression')
