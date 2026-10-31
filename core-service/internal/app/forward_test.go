@@ -381,6 +381,74 @@ func TestForwardClaimHasIndependentPauseAndPersistentRetryDueTime(t *testing.T) 
 	}
 }
 
+func TestForwardRetryAndAmbiguousDeliverySurviveAppRestart(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
+	dataDir := a.dataDir
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, accountID, ok := directScanSettings(cfg, "-1000000000123")
+	if !ok {
+		t.Fatal("direct scan settings missing")
+	}
+	if err = a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, docMessage(741, 123, 995, "retry after restart")); err != nil {
+		t.Fatal(err)
+	}
+	retryAt := time.Now().Add(time.Minute).UnixMilli()
+	if _, err = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET retry_at=? WHERE message_id=741`, retryAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,message_id,status,stage,created_at,updated_at) VALUES('-1000000000123',742,'processing','scan_direct',?,?)`, time.Now().UnixMilli(), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(ctx, Config{DataDir: dataDir, Output: io.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	var status string
+	var persistedRetryAt int64
+	if err = restarted.db.Reader.QueryRowContext(ctx, `SELECT status,retry_at FROM tgdl_forward_queue WHERE message_id=741`).Scan(&status, &persistedRetryAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || persistedRetryAt != retryAt {
+		t.Fatalf("retry after restart status=%q retry_at=%d, want pending at %d", status, persistedRetryAt, retryAt)
+	}
+	if job, err := restarted.claimForward(ctx); err != nil || job != nil {
+		t.Fatalf("future retry claimed after restart: job=%+v err=%v", job, err)
+	}
+	if err = restarted.db.Reader.QueryRowContext(ctx, `SELECT status FROM tgdl_forward_queue WHERE message_id=742`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "uncertain" {
+		t.Fatalf("in-flight delivery after restart status=%q, want uncertain", status)
+	}
+	if _, err = restarted.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET retry_at=? WHERE message_id=741`, time.Now().Add(-time.Second).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	job, err := restarted.claimForward(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job != nil && job.messageID == 741 {
+		return
+	}
+	var claimedStatus string
+	var claimedRetryAt int64
+	if err = restarted.db.Reader.QueryRowContext(ctx, `SELECT status,retry_at FROM tgdl_forward_queue WHERE message_id=741`).Scan(&claimedStatus, &claimedRetryAt); err != nil {
+		t.Fatal(err)
+	}
+	if claimedStatus != "processing" || claimedRetryAt != 0 {
+		t.Fatalf("due retry was neither claimed here nor by a worker: job=%+v status=%q retry_at=%d", job, claimedStatus, claimedRetryAt)
+	}
+}
+
 func TestForwardClaimReleasedWhenPacingDelayIsCancelled(t *testing.T) {
 	ctx := context.Background()
 	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
