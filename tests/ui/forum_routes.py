@@ -58,5 +58,49 @@ with sync_playwright() as p:
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), f'overflow at {width}'
         page.locator('[data-forward-route]').evaluate('(el) => el.remove()')
         assert page.evaluate('routesHarness.collect()') == []
+    # Large monitored-chat destination search must remain bounded without
+    # dropping the canonical native select options or the chosen destination.
+    page.evaluate('''() => {
+      state.allDialogs = Array.from({length: 5000}, (_, i) => ({
+        id: String(-1000000 - i), name: 'Target ' + String(i).padStart(4, '0')
+      }));
+      window.routesHarness.setup();
+      document.addEventListener('click', onClick);
+      document.addEventListener('input', onInput);
+      const select = document.querySelector('[data-route-destination]');
+      select.innerHTML = forwardGroupOptions('-10042');
+      cacheSearchOptions(select);
+    }''')
+    result = page.evaluate('''() => {
+      const select = document.querySelector('[data-route-destination]');
+      const initial = select.options.length;
+      filterSearchOptions(select, 'Target');
+      const shown = document.querySelectorAll('[data-route-destination]')?.length;
+      const rendered = select.closest('[data-search-select]').querySelectorAll('[data-select-option]').length;
+      return {initial, after: select.options.length, rendered, selected: select.value};
+    }''')
+    assert result['initial'] > 5000, result
+    assert result['after'] == result['initial'], result
+    assert result['rendered'] == 100, result
+    assert result['selected'] == '-10042', result
+    page.evaluate('''() => {
+      const select = document.querySelector('[data-route-destination]');
+      filterSearchOptions(select, 'Target 4999');
+    }''')
+    assert page.locator('[data-select-option][data-select-option="-1004999"]').count() == 1
+    # Selecting a result beyond the first page must propagate through the
+    # delegated click handler, keep the chosen value, and survive filtering.
+    # The menu starts closed in the test fixture: open it through the real
+    # trigger before using a user-visible Playwright click.
+    page.locator('[data-route-destination]').locator('xpath=..').locator('[data-select-trigger]').click()
+    page.locator('[data-route-destination]').locator('xpath=..').locator('[data-option-search]').fill('Target 4999')
+    page.locator('[data-select-option][data-select-option="-1004999"]').click()
+    assert page.locator('[data-route-destination]').input_value() == '-1004999'
+    page.evaluate('''() => {
+      const select = document.querySelector('[data-route-destination]');
+      filterSearchOptions(select, 'No existing destination');
+    }''')
+    assert page.locator('[data-route-destination]').input_value() == '-1004999'
+    assert page.locator('[data-select-option]').count() == 0
     browser.close()
-print('PASS: mobile/desktop route IDs and captions survive failed, empty and successful topic lookup; removing all routes saves an empty list')
+print('PASS: route preservation and 5000-dialog bounded search regression')

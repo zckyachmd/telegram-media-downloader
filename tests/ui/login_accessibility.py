@@ -15,6 +15,11 @@ with sync_playwright() as p:
         'core-service/internal/webassets/public/css/tailwind.css').read_text()))
     page.route('http://localhost/login', lambda route: route.fulfill(
         content_type='text/html', body=html))
+    # The page is an ES module and cannot register its submit handlers if
+    # the fixture aborts the production i18n module import.
+    page.route('http://localhost/js/i18n.js', lambda route: route.fulfill(
+        content_type='application/javascript', body=(Path(__file__).resolve().parents[2] /
+        'core-service/internal/webassets/public/js/i18n.js').read_text()))
     page.route('http://localhost/api/login', lambda route: route.fulfill(
         status=401, json={'success': False, 'error': 'Invalid password'}))
     page.route('http://localhost/api/auth/reset/request', lambda route: route.fulfill(

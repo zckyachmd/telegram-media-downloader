@@ -667,14 +667,19 @@ async function init() {
     // route waits for them. Stats (footer counters; may scan the disk on a
     // cold cache) don't shape the first page and no longer delay it.
     await loadGroups();
+    // A full Telegram dialog listing may block on MTProto/network for up to
+    // two minutes. It is useful metadata, but not a prerequisite for routing
+    // or rendering the already-cached groups. Keep boot interactive while it
+    // loads; chat-specific views can request dialogs when actually needed.
     if (isAdmin) {
-        try {
-            const res = await api.get('/api/dialogs');
-            state.allDialogs = res?.dialogs || res || [];
-            state.dialogsAccounts = Array.isArray(res?.accounts) ? res.accounts : [];
-        } catch {
-            // The dashboard still opens if Telegram metadata is unavailable.
-        }
+        void api.get('/api/dialogs')
+            .then((res) => {
+                state.allDialogs = res?.dialogs || res || [];
+                state.dialogsAccounts = Array.isArray(res?.accounts) ? res.accounts : [];
+            })
+            .catch(() => {
+                // Telegram may be unavailable; cached groups still render.
+            });
     }
     loadStats();
 

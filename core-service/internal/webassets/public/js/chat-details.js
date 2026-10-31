@@ -613,19 +613,31 @@ function filterSearchOptions(select, query = null) {
     }));
     const value = input ? (query ?? input.value).trim().toLocaleLowerCase() : '';
     const selected = select.value;
-    const matching = options.filter((option) => !value || option.label.toLocaleLowerCase().includes(value));
-    select.replaceChildren(...options.map((option) => {
-        const element = document.createElement('option');
-        element.value = option.value;
-        element.textContent = option.label;
-        element.disabled = option.disabled;
-        element.selected = option.value === selected;
-        return element;
-    }));
+    // The native <select> is the canonical full option set. Rebuilding all
+    // options for every search keystroke was O(N) DOM churn and could stall
+    // configuration pages with thousands of dialogs or forum topics.
+    // Search the cached descriptors and render only a bounded visible menu.
+    const MAX_VISIBLE_OPTIONS = 100;
+    const matching = [];
+    let matchCount = 0;
+    for (const option of options) {
+        if (value && !option.label.toLocaleLowerCase().includes(value)) continue;
+        matchCount++;
+        if (matching.length < MAX_VISIBLE_OPTIONS) matching.push(option);
+    }
     const list = widget?.querySelector('[data-select-options]');
-    if (list) list.innerHTML = matching.length
-        ? matching.map((option) => `<button type="button" role="option" class="${option.value === selected ? 'is-selected' : ''}" aria-selected="${option.value === selected}" data-select-option="${escapeHtml(option.value)}" ${option.disabled ? 'disabled' : ''}><span class="cd-select-option-text">${escapeHtml(option.label)}</span>${option.value === selected ? '<i class="ri-check-line cd-select-check" aria-hidden="true"></i>' : ''}</button>`).join('')
-        : `<span class="cd-select-empty">${escapeHtml(input?.dataset.optionSearchEmpty || 'No matching options.')}</span>`;
+    if (list) {
+        list.innerHTML = matchCount
+            ? matching.map((option) => `<button type="button" role="option" class="${option.value === selected ? 'is-selected' : ''}" aria-selected="${option.value === selected}" data-select-option="${escapeHtml(option.value)}" ${option.disabled ? 'disabled' : ''}><span class="cd-select-option-text">${escapeHtml(option.label)}</span>${option.value === selected ? '<i class="ri-check-line cd-select-check" aria-hidden="true"></i>' : ''}</button>`).join('')
+            : `<span class="cd-select-empty">${escapeHtml(input?.dataset.optionSearchEmpty || 'No matching options.')}</span>`;
+        if (matchCount > matching.length) {
+            const hint = document.createElement('span');
+            hint.className = 'cd-select-empty';
+            hint.setAttribute('role', 'status');
+            hint.textContent = `Showing first ${matching.length} of ${matchCount} matches. Type to narrow results.`;
+            list.appendChild(hint);
+        }
+    }
     const selectedOption = options.find((option) => option.value === selected);
     const trigger = widget?.querySelector('[data-select-trigger]');
     if (trigger) {
@@ -634,7 +646,7 @@ function filterSearchOptions(select, query = null) {
         trigger.setAttribute('aria-label', selectedOption?.label || input?.getAttribute('aria-label') || 'Select option');
     }
     const empty = input?.dataset.optionSearchEmpty;
-    input?.setAttribute('aria-description', value && !options.some((option) => option.label.toLocaleLowerCase().includes(value)) ? empty : '');
+    input?.setAttribute('aria-description', value && matchCount === 0 ? empty : '');
 }
 
 function closeSearchSelect(widget) {
