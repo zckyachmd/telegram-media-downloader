@@ -316,7 +316,7 @@
                     window.location.href = '/';
                 } else {
                     errorDiv.textContent = res.status === 401
-                        ? window.t('auth.invalid_password')
+                        ? window.t('auth.invalid_password', 'Invalid password')
                         : data.error || window.t('auth.invalid_password');
                     errorDiv.classList.remove('hidden');
                     btn.disabled = false;
