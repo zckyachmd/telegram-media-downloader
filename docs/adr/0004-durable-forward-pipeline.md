@@ -10,7 +10,7 @@ Forwarding needs to choose a delivery method for each destination, retain the ef
 
 ## Decision
 
-Keep one durable forward job per source media item. Snapshot resolved destination settings at enqueue time and persist each destination's method, stage, and outcome in the job. Use native Telegram forwarding when the source caption can be retained and protection is off. Use the library file when caption transformation or protection requires a new upload. Manual forwards of library media enter the same queue.
+Keep one durable forward job per source media item. Snapshot resolved destination settings at enqueue time and persist each destination's method, stage, and outcome in the job. Use native Telegram forwarding when the source caption can be retained, or stripped with `drop_media_captions`, and protection is off. Use the library file for protected copies and routes that require an upload fallback; direct custom-caption routes may edit the returned destination message. Manual forwards of library media enter the same queue.
 
 ## Consequences
 

@@ -40,6 +40,19 @@ type mcpForwardRetryInput struct {
 	ID             int64  `json:"id" jsonschema:"Forward queue item ID"`
 	IdempotencyKey string `json:"idempotencyKey" jsonschema:"Unique request key, 8-128 characters"`
 }
+type mcpForwardSnapshotInput struct {
+	Page int `json:"page,omitempty" jsonschema:"One-based forward queue page, defaults to 1"`
+}
+type mcpForwardReconcileInput struct {
+	ID                   int64  `json:"id" jsonschema:"Forward queue item ID"`
+	DestinationIndex     *int   `json:"destinationIndex,omitempty" jsonschema:"Optional destination index from queue.snapshot; reconcile only that destination"`
+	Action               string `json:"action" jsonschema:"sent or resend"`
+	ConfirmDuplicateRisk bool   `json:"confirmDuplicateRisk,omitempty" jsonschema:"Required for resend because it can create a duplicate"`
+	IdempotencyKey       string `json:"idempotencyKey" jsonschema:"Unique request key, 8-128 characters"`
+}
+type mcpForwardBucketInput struct {
+	IdempotencyKey string `json:"idempotencyKey" jsonschema:"Unique request key, 8-128 characters"`
+}
 type mcpApprovalDecisionInput struct {
 	ApprovalID string `json:"approvalId" jsonschema:"Pending approval ID"`
 	Decision   string `json:"decision" jsonschema:"approved or rejected"`
@@ -337,7 +350,7 @@ func (a *App) registerMCPTools(server *mcp.Server) {
 		payload := map[string]any{"accountId": in.AccountID, "groupId": in.GroupID, "messageId": in.MessageID, "message": in.Message}
 		return a.mcpRequestApproval(ctx, agent, in.IdempotencyKey, "message.edit", in.GroupID, "Edit a Telegram text message", payload)
 	})
-	addMCPMapTool(server, a.mcpControl, "queue.snapshot", "Read bounded download and forward queue metadata, filtered to the agent's authorized accounts and chats. Local file paths are omitted.", true, func(ctx context.Context, _ mcpEmpty) (map[string]any, error) {
+	addMCPMapTool(server, a.mcpControl, "queue.snapshot", "Read bounded download and paginated forward queue metadata, filtered to the agent's authorized accounts and chats. Local file paths are omitted.", true, func(ctx context.Context, in mcpForwardSnapshotInput) (map[string]any, error) {
 		agent, tokenScopes, err := a.requireMCPAgent(ctx, "queue.read")
 		if err != nil {
 			return nil, err
@@ -349,7 +362,8 @@ func (a *App) registerMCPTools(server *mcp.Server) {
 		out := a.filterQueueSnapshot(ctx, snapshot, agent)
 		forward := map[string]any{"total": 0, "pending": 0, "active": 0, "forwarded": 0, "failed": 0, "interrupted": 0, "items": []map[string]any{}}
 		if agent.AllowsScope("forward.read") && tokenHasScope(tokenScopes, "forward.read") {
-			forward, err = a.forwardQueueSnapshot(ctx, 0)
+			page := min(1_000_000, max(1, in.Page))
+			forward, err = a.forwardQueueSnapshot(ctx, (page-1)*forwardQueuePageSize)
 			if err != nil {
 				return nil, err
 			}
@@ -416,34 +430,8 @@ func (a *App) registerMCPTools(server *mcp.Server) {
 		if err != nil {
 			return nil, err
 		}
-		var groupID string
-		if err := a.db.Reader.QueryRowContext(ctx, `SELECT group_id FROM tgdl_forward_queue WHERE id=?`, in.ID).Scan(&groupID); err != nil {
+		if err := a.authorizeMCPForwardJob(ctx, agent, in.ID); err != nil {
 			return nil, err
-		}
-		if in.ID <= 0 || !agent.AllowsChat(groupID) || !a.mcpChatAccountsAllowed(ctx, agent, groupID) {
-			return nil, errors.New("agent is not allowed to retry this forward item")
-		}
-		forwardSnapshot, err := a.forwardQueueSnapshot(ctx, 0)
-		if err != nil {
-			return nil, err
-		}
-		items, _ := forwardSnapshot["items"].([]map[string]any)
-		found := false
-		for _, item := range items {
-			if int64(number(item["id"], 0)) != in.ID {
-				continue
-			}
-			found = true
-			destinations, _ := item["destinations"].([]string)
-			for _, destination := range destinations {
-				if !agent.AllowsChat(destination) || !a.mcpChatAccountsAllowed(ctx, agent, destination) {
-					return nil, errors.New("agent is not allowed for every destination of this forward item")
-				}
-			}
-			break
-		}
-		if !found {
-			return nil, errors.New("forward item is outside the agent's visible scope")
 		}
 		payload := map[string]any{"id": in.ID}
 		if err := a.mcpControl.Audit(ctx, "agent", agent.ID, "forward.retry", fmt.Sprint(in.ID), "requested one forward retry", mcpcontrol.PayloadDigest(payload), "requested", ""); err != nil {
@@ -465,6 +453,97 @@ func (a *App) registerMCPTools(server *mcp.Server) {
 			return nil, errors.New("forward item was retried but idempotency recording failed")
 		}
 		if err := a.mcpControl.Audit(ctx, "agent", agent.ID, "forward.retry", fmt.Sprint(in.ID), "retried forward item", mcpcontrol.PayloadDigest(payload), "succeeded", ""); err != nil {
+			return nil, errors.New("operation succeeded but audit write failed")
+		}
+		return out, nil
+	})
+	for _, operation := range []struct {
+		name   string
+		bucket string
+		paused bool
+	}{{"forward.pause", "forward", true}, {"forward.resume", "forward", false}, {"download.pause", "download", true}, {"download.resume", "download", false}} {
+		operation := operation
+		addMCPMapTool(server, a.mcpControl, operation.name, "Pause or resume only the named persistent work bucket.", false, func(ctx context.Context, in mcpForwardBucketInput) (map[string]any, error) {
+			scope := "forward.control"
+			if operation.bucket == "download" {
+				scope = "queue.control"
+			}
+			agent, _, err := a.requireMCPAgent(ctx, scope)
+			if err != nil {
+				return nil, err
+			}
+			paused := operation.paused
+			payload := map[string]any{"paused": paused}
+			if err := a.mcpControl.Audit(ctx, "agent", agent.ID, operation.name, operation.bucket, "requested worker control", mcpcontrol.PayloadDigest(payload), "requested", ""); err != nil {
+				return nil, errors.New("audit unavailable; forward workers were not changed")
+			}
+			if cached, hit, err := a.mcpControl.BeginIdempotency(ctx, agent.ID, in.IdempotencyKey, payload); err != nil {
+				return nil, err
+			} else if hit {
+				var out map[string]any
+				_ = json.Unmarshal(cached, &out)
+				return out, nil
+			}
+			var controlErr error
+			if operation.bucket == "forward" {
+				controlErr = a.setForwardQueuePaused(ctx, paused)
+			} else if paused {
+				controlErr = a.monitor.PauseAll(ctx)
+			} else {
+				controlErr = a.monitor.ResumeAll(ctx)
+			}
+			if controlErr != nil {
+				_ = a.mcpControl.Audit(ctx, "agent", agent.ID, operation.name, operation.bucket, "worker control failed", mcpcontrol.PayloadDigest(payload), "failed", "")
+				return nil, controlErr
+			}
+			if operation.bucket == "download" {
+				op := "download-resume"
+				if paused {
+					op = "download-pause"
+				}
+				queueChanged(a, map[string]any{"op": op})
+			}
+			out := map[string]any{"success": true, "bucket": operation.bucket, "paused": paused}
+			if err := a.mcpControl.CompleteIdempotency(ctx, agent.ID, in.IdempotencyKey, out); err != nil {
+				return nil, errors.New("forward worker control changed but idempotency recording failed")
+			}
+			if err := a.mcpControl.Audit(ctx, "agent", agent.ID, operation.name, operation.bucket, "changed worker pause state", mcpcontrol.PayloadDigest(payload), "succeeded", ""); err != nil {
+				return nil, errors.New("operation succeeded but audit write failed")
+			}
+			return out, nil
+		})
+	}
+	addMCPMapTool(server, a.mcpControl, "forward.reconcile", "Confirm an uncertain delivery or explicitly request a resend after warning about duplicate risk.", false, func(ctx context.Context, in mcpForwardReconcileInput) (map[string]any, error) {
+		agent, _, err := a.requireMCPAgent(ctx, "forward.write")
+		if err != nil {
+			return nil, err
+		}
+		if in.ID <= 0 || (in.Action != "sent" && in.Action != "resend") || (in.Action == "resend" && !in.ConfirmDuplicateRisk) {
+			return nil, errors.New("valid job ID and action required; resend also requires duplicate-risk confirmation")
+		}
+		if err := a.authorizeMCPForwardJob(ctx, agent, in.ID); err != nil {
+			return nil, err
+		}
+		payload := map[string]any{"id": in.ID, "destinationIndex": in.DestinationIndex, "action": in.Action, "confirmDuplicateRisk": in.ConfirmDuplicateRisk}
+		if err := a.mcpControl.Audit(ctx, "agent", agent.ID, "forward.reconcile", fmt.Sprint(in.ID), "requested uncertain delivery reconciliation", mcpcontrol.PayloadDigest(payload), "requested", ""); err != nil {
+			return nil, errors.New("audit unavailable; forward job was not changed")
+		}
+		if cached, hit, err := a.mcpControl.BeginIdempotency(ctx, agent.ID, in.IdempotencyKey, payload); err != nil {
+			return nil, err
+		} else if hit {
+			var out map[string]any
+			_ = json.Unmarshal(cached, &out)
+			return out, nil
+		}
+		out, err := callMCPAppHandler(ctx, "POST", fmt.Sprintf("/api/forward-queue/%d/reconcile", in.ID), map[string]string{"id": fmt.Sprint(in.ID)}, map[string]any{"action": in.Action, "confirmDuplicateRisk": in.ConfirmDuplicateRisk, "destinationIndex": in.DestinationIndex}, a.handleForwardQueueReconcile)
+		if err != nil {
+			_ = a.mcpControl.Audit(ctx, "agent", agent.ID, "forward.reconcile", fmt.Sprint(in.ID), "forward reconciliation failed", mcpcontrol.PayloadDigest(payload), "failed", "")
+			return nil, err
+		}
+		if err := a.mcpControl.CompleteIdempotency(ctx, agent.ID, in.IdempotencyKey, out); err != nil {
+			return nil, errors.New("forward job changed but idempotency recording failed")
+		}
+		if err := a.mcpControl.Audit(ctx, "agent", agent.ID, "forward.reconcile", fmt.Sprint(in.ID), "reconciled uncertain delivery", mcpcontrol.PayloadDigest(payload), "succeeded", ""); err != nil {
 			return nil, errors.New("operation succeeded but audit write failed")
 		}
 		return out, nil
@@ -714,6 +793,62 @@ func (a *App) mcpChatAccountsAllowed(ctx context.Context, agent mcpcontrol.Agent
 		}
 	}
 	return count > 0
+}
+
+func (a *App) authorizeMCPForwardJob(ctx context.Context, agent mcpcontrol.Agent, id int64) error {
+	var groupID, configJSON, statesJSON string
+	var topicID int
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT group_id,topic_id,forward_config_json,destinations_json FROM tgdl_forward_queue WHERE id=?`, id).Scan(&groupID, &topicID, &configJSON, &statesJSON); err != nil {
+		return errors.New("forward item is unavailable")
+	}
+	if !agent.AllowsChat(groupID) || !a.mcpChatAccountsAllowed(ctx, agent, groupID) {
+		return errors.New("agent is not allowed for the source chat of this forward item")
+	}
+	var saved forwardConfigSnapshot
+	_ = json.Unmarshal([]byte(configJSON), &saved)
+	if saved.AccountID != "" && !a.mcpChatAccountAllowed(ctx, agent, groupID, saved.AccountID) {
+		return errors.New("agent is not allowed for the source account of this forward item")
+	}
+	var states []forwardDestination
+	_ = json.Unmarshal([]byte(statesJSON), &states)
+	targets := make(map[string]bool)
+	addTarget := func(settings map[string]any) {
+		destination := toString(settings["destinationGroupId"])
+		if destination == "" {
+			destination = toString(settings["destination"])
+		}
+		if destination != "" {
+			targets[destination] = true
+		}
+	}
+	for _, state := range states {
+		addTarget(state.Settings)
+	}
+	for _, state := range saved.Destinations {
+		addTarget(state.Settings)
+	}
+	if len(targets) == 0 {
+		settings := saved.Settings
+		if settings == nil {
+			cfg, err := a.config.Load(ctx)
+			if err != nil {
+				return errors.New("forward authorization state unavailable")
+			}
+			settings, _, _ = forwardSettings(cfg, groupID)
+		}
+		for _, route := range matchingForwardRoutes(settings, topicID) {
+			addTarget(route)
+		}
+	}
+	if len(targets) == 0 {
+		return errors.New("forward item has no saved destinations")
+	}
+	for destination := range targets {
+		if !agent.AllowsChat(destination) || !a.mcpChatAccountsAllowed(ctx, agent, destination) {
+			return errors.New("agent is not allowed for every destination of this forward item")
+		}
+	}
+	return nil
 }
 
 func validateMCPGroupPatch(agent mcpcontrol.Agent, patch map[string]any) error {
@@ -1079,13 +1214,14 @@ func (a *App) filterQueueSnapshot(ctx context.Context, snapshot map[string]any, 
 func (a *App) filterForwardSnapshot(ctx context.Context, snapshot map[string]any, agent mcpcontrol.Agent) map[string]any {
 	itemsRaw, _ := snapshot["items"].([]map[string]any)
 	items := make([]map[string]any, 0, len(itemsRaw))
-	counts := map[string]int{"pending": 0, "processing": 0, "forwarded": 0, "failed": 0, "interrupted": 0}
+	counts := map[string]int{"pending": 0, "processing": 0, "forwarded": 0, "failed": 0, "interrupted": 0, "uncertain": 0}
 	for _, item := range itemsRaw {
 		group := toString(item["groupId"])
 		if !agent.AllowsChat(group) || !a.mcpChatAccountsAllowed(ctx, agent, group) {
 			continue
 		}
 		filtered := cloneConfigValue(item).(map[string]any)
+		filtered["reason"] = a.safeForwardReason(toString(filtered["reason"]))
 		var destinations []any
 		allowedDestinations := map[string]bool{}
 		if raw, ok := filtered["destinations"].([]string); ok {
@@ -1120,5 +1256,5 @@ func (a *App) filterForwardSnapshot(ctx context.Context, snapshot map[string]any
 		state := toString(item["status"])
 		counts[state]++
 	}
-	return map[string]any{"total": len(items), "pending": counts["pending"], "active": counts["processing"], "forwarded": counts["forwarded"], "failed": counts["failed"], "interrupted": counts["interrupted"], "items": items}
+	return map[string]any{"total": len(items), "pending": counts["pending"], "active": counts["processing"], "forwarded": counts["forwarded"], "failed": counts["failed"], "interrupted": counts["interrupted"], "uncertain": counts["uncertain"], "paused": snapshot["paused"], "workerStatus": snapshot["workerStatus"], "concurrency": snapshot["concurrency"], "capacity": snapshot["capacity"], "page": snapshot["page"], "pageSize": snapshot["pageSize"], "hasMore": snapshot["hasMore"], "items": items}
 }

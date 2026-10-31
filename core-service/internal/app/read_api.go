@@ -135,6 +135,9 @@ func (a *App) handleAPIForwardQueueSnapshot(w http.ResponseWriter, r *http.Reque
 	if err != nil || page < 1 {
 		page = 1
 	}
+	if page > 1_000_000 {
+		page = 1_000_000
+	}
 	forwardQueue, err := a.forwardQueueSnapshot(r.Context(), (page-1)*forwardQueuePageSize)
 	if err != nil {
 		writeJSONError(w, 500, "forward queue read failed")

@@ -7,11 +7,9 @@
 # machine to set the dashboard password, then add a Telegram account.
 services:
   telegram-downloader:
-    # Prebuilt multi-arch image; `pull_policy: always` makes
-    # `docker compose up -d` pick up each new release. To build from source
-    # instead, replace these two lines with `build: .`.
-    image: ghcr.io/botnick/telegram-media-downloader:latest
-    pull_policy: always
+    # Build from the local source tree.
+    build: .
+    image: telegram-media-downloader:local
     container_name: telegram-downloader
     restart: unless-stopped
     stop_grace_period: 60s
@@ -49,7 +47,8 @@ services:
     deploy:
       resources:
         limits:
-          memory: ${TGDL_MEM_LIMIT:-8g}
+          cpus: "2.0"
+          memory: ${TGDL_MEM_LIMIT:-2g}
         reservations:
           memory: 256m
     logging:
@@ -63,9 +62,7 @@ services:
     image: willfarrell/autoheal:latest
     container_name: telegram-downloader-autoheal
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
-    # Needs only the docker socket, no network.
+    profiles: [ops]
     network_mode: none
     environment:
       - AUTOHEAL_CONTAINER_LABEL=autoheal
@@ -81,20 +78,13 @@ services:
         max-size: "1m"
         max-file: "3"
 
-  # Updater behind Settings → Maintenance → "Install update". It touches only
-  # containers with the watchtower label (all four here, itself included) and
-  # the dashboard never sees the docker socket. Automatic updates: set
-  # WATCHTOWER_HTTP_API_PERIODIC_POLLS=true in .env (schedule below, 6-field
-  # cron in the container TZ; default daily 04:00).
   watchtower:
     image: nickfedor/watchtower:latest
     container_name: telegram-downloader-updater
     restart: unless-stopped
-    labels:
-      - "com.centurylinklabs.watchtower.enable=true"
+    profiles: [ops]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      # Only the generated token folder, never the DB/sessions.
       - ./data/watchtower:/run/tgdl:ro
     depends_on:
       telegram-downloader:

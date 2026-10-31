@@ -1518,6 +1518,7 @@
   "queue.forward.retry_all_confirm": "Sebanyak {count} pekerjaan gagal atau terputus akan dimasukkan kembali ke antrean forward. Pastikan engine berjalan terlebih dahulu.",
   "queue.forward.retry_all_confirm_button": "Ulangi semua",
   "queue.forward.retry_all_done": "{count} pekerjaan forward masuk antrean ulang",
+  "queue.forward.interval_saved": "Jeda antar forward diperbarui",
   "queue.forward.page": "{start}–{end} dari {total}",
   "queue.forward.count.pending": "Menunggu",
   "queue.forward.count.active": "Aktif",

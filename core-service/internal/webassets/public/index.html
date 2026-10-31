@@ -949,7 +949,7 @@
                                     </div>
                                     <div>
                                         <label for="setting-adv-forward-interval-sec" class="text-tg-text text-xs block mb-1" data-i18n="settings.advanced.forward_interval">Start interval (seconds)</label>
-                                        <input id="setting-adv-forward-interval-sec" type="number" min="0" max="3600" class="tg-input w-full text-sm" placeholder="0">
+                                        <input id="setting-adv-forward-interval-sec" type="number" min="0" max="3600" class="tg-input w-full text-sm" placeholder="1">
                                         <p class="text-[10px] text-tg-textSecondary mt-1" data-i18n="settings.advanced.forward_interval_help">Minimum gap between forward starts across all workers. 0 means no added delay.</p>
                                     </div>
                                     <div>
@@ -1730,43 +1730,6 @@
                     <section class="bg-tg-panel rounded-xl p-3 mb-3">
                         <div id="queue-chips" class="queue-chip-row" role="toolbar" data-i18n-aria-label="queue.chips_label" aria-label="Filter queue jobs"></div>
                     </section>
-                    <section id="queue-forward-panel" class="hidden bg-tg-panel rounded-xl p-3 mb-3" aria-labelledby="queue-forward-heading">
-                        <div class="flex items-center justify-between gap-2 mb-2">
-                            <div class="min-w-0">
-                                <h2 id="queue-forward-heading" class="text-sm font-medium text-tg-text flex items-center gap-2">
-                                    <i class="ri-send-plane-line text-tg-blue" aria-hidden="true"></i>
-                                    <span data-i18n="queue.forward.group">Forward</span>
-                                </h2>
-                                <p id="queue-forward-total" class="mt-0.5 text-xs text-tg-textSecondary" aria-live="polite"></p>
-                            </div>
-                            <button id="queue-forward-retry-all" type="button" class="tg-btn-secondary tg-btn-sm min-h-9 shrink-0 whitespace-nowrap px-2.5 text-xs" data-forward-retry-all disabled>
-                                <i class="ri-restart-line mr-1" aria-hidden="true"></i>
-                                <span data-i18n="queue.forward.retry_all_button">Retry failed &amp; interrupted (0)</span>
-                            </button>
-                        </div>
-                        <dl id="queue-forward-summary" class="grid grid-cols-2 sm:grid-cols-4 border-y border-tg-border/40 mb-2" data-i18n-aria-label="queue.forward.summary" aria-label="Forward queue status">
-                            <div class="py-2 pr-3">
-                                <dt class="text-xs text-tg-textSecondary" data-i18n="queue.forward.count.pending">Pending</dt>
-                                <dd id="queue-forward-pending" class="mt-0.5 text-base font-semibold tabular-nums text-tg-text">0</dd>
-                            </div>
-                            <div class="py-2 px-3 border-l border-tg-border/40">
-                                <dt class="text-xs text-tg-textSecondary" data-i18n="queue.forward.count.active">Active</dt>
-                                <dd id="queue-forward-active" class="mt-0.5 text-base font-semibold tabular-nums text-tg-text">0</dd>
-                            </div>
-                            <div class="py-2 pr-3 sm:px-3 sm:border-l border-tg-border/40">
-                                <dt class="text-xs text-tg-textSecondary" data-i18n="queue.forward.count.failed">Failed</dt>
-                                <dd id="queue-forward-failed" class="mt-0.5 text-base font-semibold tabular-nums text-red-400">0</dd>
-                            </div>
-                            <div class="py-2 px-3 border-l border-tg-border/40">
-                                <dt class="text-xs text-tg-textSecondary" data-i18n="queue.forward.count.interrupted">Interrupted</dt>
-                                <dd id="queue-forward-interrupted" class="mt-0.5 text-base font-semibold tabular-nums text-tg-text">0</dd>
-                            </div>
-                        </dl>
-                        <div id="queue-forward-items" class="divide-y divide-tg-border/30" aria-live="polite">
-                            <p class="py-3 text-sm text-tg-textSecondary" role="status" data-i18n="queue.forward.loading">Loading forward queue…</p>
-                        </div>
-                    </section>
-                    <div id="queue-download-panel">
                     <!-- Top toolbar — status chips (one scrollable row; the default
                          "Active" view shows downloading + queued + paused), then
                          search, sort and the ⋮ menu (speed limit, and the global
@@ -1792,7 +1755,56 @@
                             </select>
                             </div>
                             <div id="queue-actions-inline" class="shrink-0">
-                                <div id="queue-global-actions" class="queue-global-actions">
+                                <div id="queue-bucket-actions" class="queue-bucket-actions">
+                                  <div data-queue-bucket="download" class="flex items-center gap-1.5">
+                                    <button id="queue-download-pause" type="button"
+                                        class="px-3 py-1.5 text-xs rounded-lg bg-tg-bg/60 hover:bg-tg-hover text-tg-text flex items-center gap-1.5">
+                                        <span data-i18n="queue.download.pause">Pause downloads</span>
+                                    </button>
+                                    <button id="queue-download-resume" type="button"
+                                        class="px-3 py-1.5 text-xs rounded-lg bg-tg-bg/60 hover:bg-tg-hover text-tg-text flex items-center gap-1.5">
+                                        <span data-i18n="queue.download.resume">Resume downloads</span>
+                                    </button>
+                                  </div>
+                                  <div data-queue-bucket="forward" class="hidden flex items-center gap-1.5">
+                                    <button id="queue-forward-pause" type="button"
+                                        class="px-3 py-1.5 text-xs rounded-lg bg-tg-bg/60 hover:bg-tg-hover text-tg-text flex items-center gap-1.5"
+                                        data-forward-pause>
+                                        <span data-i18n="queue.forward.pause">Pause forward</span>
+                                    </button>
+                                    <button id="queue-forward-resume" type="button"
+                                        class="px-3 py-1.5 text-xs rounded-lg bg-tg-bg/60 hover:bg-tg-hover text-tg-text flex items-center gap-1.5"
+                                        data-forward-resume>
+                                        <span data-i18n="queue.forward.resume">Resume forward</span>
+                                    </button>
+                                    <button id="queue-forward-retry-all" type="button"
+                                        class="px-3 py-1.5 text-xs rounded-lg bg-tg-bg/60 hover:bg-tg-hover text-tg-text flex items-center gap-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                                        data-forward-retry-all disabled>
+                                        <i class="ri-restart-line" aria-hidden="true"></i><span data-i18n="queue.forward.retry_all_button">Retry failed &amp; interrupted (0)</span>
+                                    </button>
+                                    <p id="queue-forward-worker-state" class="text-[10px] text-tg-textSecondary" role="note"></p>
+                                  </div>
+                                </div>
+                            </div>
+                            <div class="relative shrink-0">
+                                <button id="queue-more-btn" type="button"
+                                    class="w-11 h-11 rounded-lg bg-tg-bg/60 hover:bg-tg-hover flex items-center justify-center"
+                                    aria-haspopup="menu" aria-expanded="false" aria-controls="queue-more-menu"
+                                    data-i18n-aria-label="queue.more" aria-label="More queue actions"
+                                    data-i18n-title="queue.more" title="More queue actions">
+                                    <i class="ri-more-2-fill text-lg text-tg-textSecondary" aria-hidden="true"></i>
+                                </button>
+                                <div id="queue-more-menu" class="view-mode-menu queue-more-menu" role="menu" aria-labelledby="queue-more-btn">
+                                    <div data-menu-slot class="queue-menu-sort">
+                                        <label for="queue-sort" class="text-xs text-tg-textSecondary flex items-center gap-1.5 mb-1">
+                                            <i class="ri-sort-desc" aria-hidden="true"></i><span data-i18n="queue.sort.label">Sort by</span>
+                                        </label>
+                                        <div id="queue-sort-menu-slot"></div>
+                                    </div>
+                                    <div data-menu-slot><div id="queue-bucket-actions-menu-slot"></div></div>
+                                    <div data-menu-slot>
+                                      <div id="queue-actions-menu-slot">
+                                        <div id="queue-global-actions" class="queue-global-actions">
                                     <button id="queue-pause-all" type="button"
                                         class="px-3 py-1.5 text-xs rounded-lg bg-tg-bg/60 hover:bg-tg-hover text-tg-text flex items-center gap-1.5"
                                         data-i18n-title="queue.action.pause_all" title="Pause all">
@@ -1818,24 +1830,10 @@
                                         data-i18n-title="queue.action.cancel_all" title="Cancel all queued">
                                         <i class="ri-close-circle-line" aria-hidden="true"></i><span data-i18n="queue.action.cancel_all">Cancel queued</span>
                                     </button>
-                                </div>
-                            </div>
-                            <div class="relative shrink-0">
-                                <button id="queue-more-btn" type="button"
-                                    class="w-11 h-11 rounded-lg bg-tg-bg/60 hover:bg-tg-hover flex items-center justify-center"
-                                    aria-haspopup="menu" aria-expanded="false" aria-controls="queue-more-menu"
-                                    data-i18n-aria-label="queue.more" aria-label="More queue actions"
-                                    data-i18n-title="queue.more" title="More queue actions">
-                                    <i class="ri-more-2-fill text-lg text-tg-textSecondary" aria-hidden="true"></i>
-                                </button>
-                                <div id="queue-more-menu" class="view-mode-menu queue-more-menu" role="menu" aria-labelledby="queue-more-btn">
-                                    <div data-menu-slot class="queue-menu-sort">
-                                        <label for="queue-sort" class="text-xs text-tg-textSecondary flex items-center gap-1.5 mb-1">
-                                            <i class="ri-sort-desc" aria-hidden="true"></i><span data-i18n="queue.sort.label">Sort by</span>
-                                        </label>
-                                        <div id="queue-sort-menu-slot"></div>
+                                        </div>
+                                        <p id="queue-global-scope" class="mt-1 text-[10px] text-tg-textSecondary" role="note" data-i18n="queue.action.global_scope">Global pause and resume control both download and forward buckets.</p>
+                                      </div>
                                     </div>
-                                    <div data-menu-slot><div id="queue-actions-menu-slot"></div></div>
                                     <div class="queue-throttle" role="group" aria-labelledby="queue-throttle-label">
                                         <div class="flex items-center justify-between gap-2 mb-1">
                                             <label id="queue-throttle-label" for="queue-throttle" class="text-xs text-tg-textSecondary flex items-center gap-1.5">
@@ -1844,6 +1842,14 @@
                                             <span id="queue-throttle-value" class="text-xs text-tg-text tabular-nums" data-i18n="queue.throttle.unlimited">Unlimited</span>
                                         </div>
                                         <input id="queue-throttle" type="range" min="0" max="52428800" step="262144" value="0" class="w-full accent-tg-blue">
+                                    </div>
+                                    <div class="queue-throttle border-t border-tg-border/50 pt-2" role="group" aria-labelledby="queue-forward-interval-label">
+                                        <div class="flex items-center justify-between gap-2 mb-1">
+                                            <label id="queue-forward-interval-label" for="queue-forward-interval" class="text-xs text-tg-textSecondary flex items-center gap-1.5" data-i18n="settings.advanced.forward_interval">Start interval (seconds)</label>
+                                            <span id="queue-forward-interval-value" class="text-xs text-tg-text tabular-nums">1s</span>
+                                        </div>
+                                        <input id="queue-forward-interval" type="number" min="0" max="3600" step="1" value="1" class="tg-input w-24 text-sm" aria-describedby="queue-forward-interval-help">
+                                        <p id="queue-forward-interval-help" class="text-[10px] text-tg-textSecondary mt-1" data-i18n="settings.advanced.forward_interval_help">Minimum gap between forward starts across all workers. 0 means no added delay.</p>
                                     </div>
                                 </div>
                             </div>
@@ -1939,7 +1945,6 @@
                     <section class="bg-tg-panel rounded-xl p-3 mt-3 flex flex-wrap items-center gap-3">
                         <div id="queue-aggregate" class="text-xs text-tg-textSecondary tabular-nums flex items-center gap-3 flex-wrap"></div>
                     </section>
-                    </div>
                 </div>
 
                 <!-- Tools group page (admin-only) — #/settings/tools/<group>.

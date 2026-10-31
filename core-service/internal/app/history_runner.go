@@ -14,6 +14,9 @@ import (
 )
 
 func (a *App) startHistoryWorker(id string) {
+	if a.monitor.RequireRunning() != nil {
+		return
+	}
 	a.historyMu.Lock()
 	job := a.historyJobs[id]
 	if a.enginePaused || job == nil || job.State != "running" || job.Cancelled || a.historyCancel[id] != nil {
@@ -117,13 +120,46 @@ func (a *App) historyCopy(id string) (historyJob, error) {
 	return *j, nil
 }
 
+func acquireHistoryLock(ctx context.Context, tryLock func() bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if tryLock() {
+		return nil
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if tryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
 func (a *App) runHistory(ctx context.Context, id string) error {
-	a.monitorOp.Lock()
+	if err := acquireHistoryLock(ctx, a.monitorOp.TryLock); err != nil {
+		return err
+	}
 	// A purge can remove an uninitialized job while this worker waits for
 	// monitorOp. Revalidate before opening any account clients.
 	j, err := a.historyCopy(id)
 	if err == nil {
-		err = a.startTelegramEngine(ctx, false)
+		err = a.monitor.RequireRunning()
+		if err != nil {
+			a.historyMu.Lock()
+			if current := a.historyJobs[id]; current != nil && !current.Cancelled {
+				current.enginePaused = true
+			}
+			a.historyMu.Unlock()
+		}
 	}
 	var session *engine.MessageSession
 	if err == nil {
@@ -342,7 +378,9 @@ func (a *App) initializeHistory(ctx context.Context, id, accountID string, dialo
 }
 
 func (a *App) checkpointHistory(ctx context.Context, id string, session *engine.MessageSession, cursor int, message *tg.Message, target engine.Target, allowed bool) error {
-	a.mediaMu.RLock()
+	if err := acquireHistoryLock(ctx, a.mediaMu.TryRLock); err != nil {
+		return err
+	}
 	defer a.mediaMu.RUnlock()
 	if err := a.mediaWritable(ctx); err != nil {
 		return err
@@ -365,23 +403,42 @@ func (a *App) checkpointHistory(ctx context.Context, id string, session *engine.
 	}
 	j.cursor = cursor
 	j.Processed++
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		return err
+	}
+	directSettings, accountID, scanRoute := scanRouteSettings(cfg, j.GroupID)
+	directOnly := scanRoute == "direct"
+	forwardLimit := 0
+	if scanRoute == "direct" || scanRoute == "both" {
+		forwardLimit = a.forwarderConfig(ctx).queueSize
+	}
 	tx, err := a.db.Writer.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	var workID int64
+	var queuedForward bool
 	if allowed {
 		if target.ID != j.GroupID {
 			return errors.New("history filter selected another group")
 		}
-		var changed bool
-		workID, changed, err = session.QueueTx(ctx, tx, target, message, j.Mode == "rescan")
-		if err != nil {
-			return err
+		if scanRoute == "direct" || scanRoute == "both" {
+			queuedForward, err = insertDirectScanTx(ctx, tx, target.ID, target.Name, accountID, directSettings, cfg, forwardLimit, message)
+			if err != nil {
+				return err
+			}
 		}
-		if changed {
-			j.Downloaded++
+		if !directOnly {
+			var changed bool
+			workID, changed, err = session.QueueTx(ctx, tx, target, message, j.Mode == "rescan")
+			if err != nil {
+				return err
+			}
+			if changed {
+				j.Downloaded++
+			}
 		}
 	}
 	if err = historySaveTx(ctx, tx, j); err != nil {
@@ -392,6 +449,13 @@ func (a *App) checkpointHistory(ctx context.Context, id string, session *engine.
 	}
 	*current = j
 	session.Wake(workID)
+	if queuedForward {
+		a.notifyForwardQueue()
+		select {
+		case a.forwards <- struct{}{}:
+		default:
+		}
+	}
 	a.hub.Broadcast(ws.Event{Type: "history_progress", Flat: true, Payload: map[string]any{"jobId": j.ID, "processed": j.Processed, "downloaded": j.Downloaded, "skipped": j.Processed - j.Downloaded, "urls": 0, "group": j.Group, "groupId": j.GroupID, "limit": j.Limit, "startedAt": j.StartedAt, "mode": j.Mode, "currentId": cursor}})
 	return nil
 }
@@ -483,7 +547,10 @@ func (a *App) finishHistory(id string, cause error) {
 	a.hub.Broadcast(ws.Event{Type: event, Flat: true, Payload: payload})
 }
 
-func (a *App) startHistoryDrain(restart bool) {
+func (a *App) startHistoryDrain(allowEngineStart bool) {
+	if !allowEngineStart && a.monitor.RequireRunning() != nil {
+		return
+	}
 	a.historyMu.Lock()
 	if a.enginePaused || a.historyDrain {
 		a.historyMu.Unlock()
@@ -514,9 +581,12 @@ func (a *App) startHistoryDrain(restart bool) {
 			// Read after acquiring it; an older snapshot can reopen accounts
 			// after a successful purge has removed the last manual job.
 			pending, err := a.monitor.PendingManual(a.ctx)
-			if err == nil && pending > 0 && a.engineWorkEnabled() && (restart || a.monitor.RequireRunning() != nil) {
-				err = a.startTelegramEngine(a.ctx, false)
-				restart = false
+			if err == nil && pending > 0 && a.engineWorkEnabled() && a.monitor.RequireRunning() != nil {
+				if allowEngineStart {
+					err = a.startTelegramEngine(a.ctx, false)
+				} else {
+					err = engine.ErrEngineNotRunning
+				}
 			}
 			if err == nil {
 				err = a.monitor.StopIdleJobs(a.ctx)

@@ -1454,6 +1454,7 @@
     "queue.forward.retry_all_confirm": "งานที่ล้มเหลวหรือหยุดชะงัก {count} รายการจะกลับเข้าสู่คิวส่งต่อ โปรดเปิด Engine ก่อน",
     "queue.forward.retry_all_confirm_button": "ลองทั้งหมดอีกครั้ง",
     "queue.forward.retry_all_done": "เพิ่มงานส่งต่อ {count} รายการเข้าคิวแล้ว",
+    "queue.forward.interval_saved": "อัปเดตช่วงห่างการส่งต่อแล้ว",
     "queue.forward.count.pending": "รอดำเนินการ",
     "queue.forward.count.active": "กำลังทำงาน",
     "queue.forward.count.forwarded": "ส่งต่อแล้ว",

@@ -43,7 +43,7 @@ func TestHistoryDateWindowReachesTelegramAndPersists(t *testing.T) {
 			if _, err = a.db.Writer.Exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_path,file_type,file_size,status) VALUES('-1000000000042','Old',10,'b','b','document',4,'completed'),('-1000000000042','Old',20,'c','c','document',4,'completed')`); err != nil {
 				t.Fatal(err)
 			}
-			res := historyHTTP(t, a, "POST", "/api/history", fmt.Sprintf(`{"groupId":"-1000000000042","limit":0,"mode":%q,"offsetDate":"2024-03-02","minDate":1709251200000}`, mode))
+			res := historyStartHTTP(t, a, fmt.Sprintf(`{"groupId":"-1000000000042","limit":0,"mode":%q,"offsetDate":"2024-03-02","minDate":1709251200000}`, mode))
 			if res["offsetDate"] != float64(1709337600) || res["minDate"] != float64(1709251200) {
 				t.Fatalf("response %v", res)
 			}

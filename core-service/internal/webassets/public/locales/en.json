@@ -1518,6 +1518,7 @@
     "queue.forward.retry_all_confirm": "This will return {count} failed or interrupted jobs to the forward queue. Make sure the engine is running first.",
     "queue.forward.retry_all_confirm_button": "Retry all",
     "queue.forward.retry_all_done": "Queued {count} forward retries",
+    "queue.forward.interval_saved": "Forward spacing updated",
     "queue.forward.page": "{start}–{end} of {total}",
     "queue.forward.count.pending": "Pending",
     "queue.forward.count.active": "Active",

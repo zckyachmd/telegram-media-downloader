@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -71,6 +72,23 @@ func historyHTTP(t *testing.T, a *App, method, path, body string) map[string]any
 		t.Fatal(err)
 	}
 	return result
+}
+
+func historyTestEngineRunning(t *testing.T, a *App) {
+	t.Helper()
+	if a.monitor.RequireRunning() != nil {
+		a.monitorOp.Lock()
+		err := a.startTelegramEngine(context.Background(), false)
+		a.monitorOp.Unlock()
+		if err != nil {
+			t.Fatalf("start Engine for backfill: %v", err)
+		}
+	}
+}
+
+func historyStartHTTP(t *testing.T, a *App, body string) map[string]any {
+	historyTestEngineRunning(t, a)
+	return historyHTTP(t, a, "POST", "/api/history", body)
 }
 
 func historyFinished(t *testing.T, a *App, id string) historyJob {
@@ -150,7 +168,7 @@ func TestHistoryHTTPDownloadsDisabledGroupWithoutStartingLiveMonitor(t *testing.
 	}
 	defer a.Close()
 	configureDisabledHistory(t, a)
-	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042","limit":0,"mode":"rescan"}`)
+	res := historyStartHTTP(t, a, `{"groupId":"-1000000000042","limit":0,"mode":"rescan"}`)
 	id := res["jobId"].(string)
 	j := historyFinished(t, a, id)
 	if j.State != "done" || j.Processed != 2 || j.Downloaded != 2 {
@@ -163,6 +181,9 @@ func TestHistoryHTTPDownloadsDisabledGroupWithoutStartingLiveMonitor(t *testing.
 	status, err := a.monitor.Status(context.Background())
 	if err != nil || status["state"] != "stopped" {
 		t.Fatalf("monitor=%v %v", status, err)
+	}
+	if err := a.monitor.RequireRunning(); err != nil {
+		t.Fatalf("backfill stopped the Engine: %v", err)
 	}
 	cfg, err := a.config.Load(context.Background())
 	if err != nil {
@@ -190,9 +211,36 @@ func TestHistoryHTTPDownloadsDisabledGroupWithoutStartingLiveMonitor(t *testing.
 	}
 }
 
+func TestHistoryStartRequiresEngineRunning(t *testing.T) {
+	var made atomic.Int64
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir(), AccountFactory: func(c engine.AccountConfig, s *telegram.UpdateState, h func(context.Context, tg.UpdatesClass) error, g func(int64)) (engine.Account, error) {
+		made.Add(1)
+		return historyFactory(t, func(context.Context, telegram.HistoryRequest) (telegram.HistoryPage, error) {
+			return telegram.HistoryPage{Done: true}, nil
+		}, nil, new(atomic.Int64))(c, s, h, g)
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	configureDisabledHistory(t, a)
+	token, err := a.sessions.Create(context.Background(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := requestPurge(a, token, "POST", "/api/history", `{"groupId":"-1000000000042"}`)
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "ENGINE_NOT_RUNNING") {
+		t.Fatalf("start without Engine=%d %s", rec.Code, rec.Body.String())
+	}
+	if made.Load() != 0 || a.monitor.RequireRunning() == nil {
+		t.Fatalf("rejected backfill created %d Telegram accounts or started Engine", made.Load())
+	}
+}
+
 func TestHistoryShutdownResumesCommittedCursorWithoutRequeue(t *testing.T) {
 	dir := t.TempDir()
 	entered := make(chan struct{}, 1)
+	resumedMade := make(chan *historyTestAccount, 2)
 	var transfers atomic.Int64
 	page := func(ctx context.Context, r telegram.HistoryRequest) (telegram.HistoryPage, error) {
 		if r.OffsetID == 0 {
@@ -208,7 +256,7 @@ func TestHistoryShutdownResumesCommittedCursorWithoutRequeue(t *testing.T) {
 	}
 	defer a.Close()
 	configureDisabledHistory(t, a)
-	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042","limit":0,"mode":"rescan"}`)
+	res := historyStartHTTP(t, a, `{"groupId":"-1000000000042","limit":0,"mode":"rescan"}`)
 	id := res["jobId"].(string)
 	select {
 	case <-entered:
@@ -229,11 +277,19 @@ func TestHistoryShutdownResumesCommittedCursorWithoutRequeue(t *testing.T) {
 		}
 		return telegram.HistoryPage{}, fmt.Errorf("lost checkpoint %d", r.OffsetID)
 	}
-	b, err := New(context.Background(), Config{DataDir: dir, AccountFactory: historyFactory(t, page, nil, &transfers)})
+	b, err := New(context.Background(), Config{DataDir: dir, AccountFactory: historyFactory(t, page, resumedMade, &transfers)})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer b.Close()
+	select {
+	case <-resumedMade:
+		t.Fatal("recovered backfill opened a Telegram account before Engine start")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if b.monitor.RequireRunning() == nil {
+		t.Fatal("recovery started Engine without operator action")
+	}
 	if rec := monitorRequest(t, b, "/api/monitor/start"); rec.Code != 200 {
 		t.Fatalf("resume engine: %d %s", rec.Code, rec.Body.String())
 	}
@@ -244,6 +300,35 @@ func TestHistoryShutdownResumesCommittedCursorWithoutRequeue(t *testing.T) {
 	waitHistoryDownloads(t, b, 2)
 	if resumed.Load() != 2 {
 		t.Fatalf("resumed pages=%d", resumed.Load())
+	}
+}
+
+func TestRecoveredBackfillQueueWaitsForEngineStart(t *testing.T) {
+	dir := t.TempDir()
+	page := func(context.Context, telegram.HistoryRequest) (telegram.HistoryPage, error) {
+		return telegram.HistoryPage{Done: true}, nil
+	}
+	factory := historyFactory(t, page, nil, new(atomic.Int64))
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: dir, AccountFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	configureDisabledHistory(t, a)
+	if _, err = a.db.Writer.Exec(`INSERT INTO tgdl_work(account_id,group_id,group_name,message_id,version,identity,media_type,file_name,file_size,body,origin,created_at,updated_at) VALUES('one','-1000000000042','Native history',1,1,'fixture','document','fixture.bin',1,X'00','history',1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	b, err := New(context.Background(), Config{DataDir: dir, AccountFactory: factory})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	time.Sleep(100 * time.Millisecond)
+	if b.monitor.RequireRunning() == nil {
+		t.Fatal("recovery started Engine to drain backfill downloads")
 	}
 }
 
@@ -275,7 +360,7 @@ func TestEngineStopPausesBackfillAndStartResumesCursor(t *testing.T) {
 	}
 	defer a.Close()
 	configureDisabledHistory(t, a)
-	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042","limit":0,"mode":"rescan"}`)
+	res := historyStartHTTP(t, a, `{"groupId":"-1000000000042","limit":0,"mode":"rescan"}`)
 	id := res["jobId"].(string)
 	select {
 	case <-entered:
@@ -342,7 +427,7 @@ func TestHistorySingleFlightCancellationAndPromotion(t *testing.T) {
 	}
 	defer a.Close()
 	configureDisabledHistory(t, a)
-	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042"}`)
+	res := historyStartHTTP(t, a, `{"groupId":"-1000000000042"}`)
 	id := res["jobId"].(string)
 	select {
 	case <-entered:
@@ -385,6 +470,55 @@ func TestHistorySingleFlightCancellationAndPromotion(t *testing.T) {
 	}
 }
 
+func TestHistoryCancelInterruptsWorkerWaitingForMonitorOperation(t *testing.T) {
+	var pages atomic.Int64
+	page := func(context.Context, telegram.HistoryRequest) (telegram.HistoryPage, error) {
+		pages.Add(1)
+		return telegram.HistoryPage{Done: true}, nil
+	}
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir(), AccountFactory: historyFactory(t, page, nil, new(atomic.Int64))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	configureDisabledHistory(t, a)
+	historyTestEngineRunning(t, a)
+	a.monitorOp.Lock()
+	defer a.monitorOp.Unlock()
+	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042"}`)
+	id := res["jobId"].(string)
+	historyHTTP(t, a, "POST", "/api/history/"+id+"/cancel", `{}`)
+	job := historyFinished(t, a, id)
+	if job.State != "cancelled" || pages.Load() != 0 {
+		t.Fatalf("cancelled job=%+v history pages=%d; want cancellation without opening account", job, pages.Load())
+	}
+}
+
+func TestHistoryCheckpointCancelInterruptsMediaLockWait(t *testing.T) {
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	a.mediaMu.Lock()
+	defer a.mediaMu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- a.checkpointHistory(ctx, "missing", nil, 0, nil, engine.Target{}, false)
+	}()
+	time.Sleep(30 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("checkpoint error=%v; want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancel did not interrupt checkpoint waiting for media lock")
+	}
+}
+
 func TestHistoryRescanReusesValidBytesAndRepairsMissingFile(t *testing.T) {
 	var transfers atomic.Int64
 	page := func(_ context.Context, r telegram.HistoryRequest) (telegram.HistoryPage, error) {
@@ -408,7 +542,7 @@ func TestHistoryRescanReusesValidBytesAndRepairsMissingFile(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042","mode":"rescan"}`)
+		res := historyStartHTTP(t, a, `{"groupId":"-1000000000042","mode":"rescan"}`)
 		j := historyFinished(t, a, res["jobId"].(string))
 		if j.State != "done" || j.Downloaded != 1 {
 			t.Fatalf("rescan=%+v", j)
@@ -461,7 +595,7 @@ func TestHistoryModesUseCatalogBoundsAndRegisterUnknownGroupsDisabled(t *testing
 			if _, err = a.db.Writer.Exec(`INSERT INTO downloads(group_id,group_name,message_id,file_name,file_path,file_type,file_size,status) VALUES('-1000000000042','Old',-5,'a','a','document',4,'completed'),('-1000000000042','Old',10,'b','b','document',4,'completed'),('-1000000000042','Old',20,'c','c','document',4,'completed'),('-1000000000042','Old',1,'story-old','story-old','stories',4,'completed'),('-1000000000042','Old',4294967396,'story','story','stories',4,'completed')`); err != nil {
 				t.Fatal(err)
 			}
-			res := historyHTTP(t, a, "POST", "/api/history", fmt.Sprintf(`{"groupId":"-1000000000042","mode":%q}`, mode))
+			res := historyStartHTTP(t, a, fmt.Sprintf(`{"groupId":"-1000000000042","mode":%q}`, mode))
 			j := historyFinished(t, a, res["jobId"].(string))
 			if j.State != "done" {
 				t.Fatalf("job=%+v", j)
@@ -495,17 +629,28 @@ func TestHistoryCheckpointFailureRollsBackQueuedMessage(t *testing.T) {
 	}
 	defer a.Close()
 	configureDisabledHistory(t, a)
+	cfg, err := a.config.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg["groups"].([]any)[0].(map[string]any)["autoForward"] = map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"}
+	if err = a.config.Save(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
 	if _, err = a.db.Writer.Exec(`CREATE TRIGGER reject_history_checkpoint BEFORE UPDATE ON tgdl_history_jobs WHEN json_extract(NEW.payload,'$.job.processed')>0 BEGIN SELECT RAISE(FAIL,'checkpoint rejected'); END`); err != nil {
 		t.Fatal(err)
 	}
-	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042"}`)
+	res := historyStartHTTP(t, a, `{"groupId":"-1000000000042"}`)
 	j := historyFinished(t, a, res["jobId"].(string))
 	if j.State != "error" || j.Processed != 0 || j.Downloaded != 0 || j.Error == nil || !strings.Contains(*j.Error, "checkpoint rejected") {
 		t.Fatalf("failed checkpoint=%+v", j)
 	}
-	var rows int
-	if err = a.db.Reader.QueryRow(`SELECT count(*) FROM tgdl_work`).Scan(&rows); err != nil || rows != 0 || transfers.Load() != 0 {
-		t.Fatalf("uncommitted message escaped: rows=%d transfers=%d %v", rows, transfers.Load(), err)
+	var workRows, forwardRows int
+	if err = a.db.Reader.QueryRow(`SELECT count(*) FROM tgdl_work`).Scan(&workRows); err != nil || workRows != 0 || transfers.Load() != 0 {
+		t.Fatalf("uncommitted download escaped: rows=%d transfers=%d %v", workRows, transfers.Load(), err)
+	}
+	if err = a.db.Reader.QueryRow(`SELECT count(*) FROM tgdl_forward_queue`).Scan(&forwardRows); err != nil || forwardRows != 0 {
+		t.Fatalf("uncommitted direct forward escaped checkpoint rollback: rows=%d err=%v", forwardRows, err)
 	}
 }
 
@@ -532,7 +677,7 @@ func TestHistoryBackpressureHonorsConfiguredStallDeadline(t *testing.T) {
 	if _, err = a.db.Writer.Exec(`UPDATE tgdl_queue_state SET paused=1`); err != nil {
 		t.Fatal(err)
 	}
-	res := historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042"}`)
+	res := historyStartHTTP(t, a, `{"groupId":"-1000000000042"}`)
 	j := historyFinished(t, a, res["jobId"].(string))
 	if j.State != "error" || j.Processed != 1 || j.Error == nil || !strings.Contains(*j.Error, "stall deadline") || pages.Load() != 1 || transfers.Load() != 0 {
 		t.Fatalf("backpressure job=%+v pages=%d transfers=%d", j, pages.Load(), transfers.Load())
@@ -566,7 +711,7 @@ func TestPurgeJoinsJobsOnlyTransferAndRemovesResumableHistory(t *testing.T) {
 	}
 	defer a.Close()
 	configureDisabledHistory(t, a)
-	historyHTTP(t, a, "POST", "/api/history", `{"groupId":"-1000000000042","limit":0}`)
+	historyStartHTTP(t, a, `{"groupId":"-1000000000042","limit":0}`)
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):

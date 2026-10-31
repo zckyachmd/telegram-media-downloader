@@ -2,7 +2,7 @@ root = "."
 tmp_dir = "tmp"
 
 [build]
-cmd = "go build -o ./tmp/tgdl-server ./cmd/tgdl-server"
+cmd = "go -C core-service build -o ../tmp/tgdl-server ./cmd/tgdl-server"
 entrypoint = ["./tmp/tgdl-server"]
 include_ext = ["go"]
 exclude_dir = ["tmp", "vendor"]
@@ -20,7 +20,7 @@ time = true
 clean_on_exit = true
 
 [proxy]
-enabled = false
+enabled = true
 proxy_port = 3002
 app_port = 3003
 app_start_timeout = 30000

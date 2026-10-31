@@ -35,20 +35,21 @@ import (
 )
 
 type Config struct {
-	HTTP                HTTPOptions
-	AccountFactory      engine.Factory
-	AccountLoginFactory telegram.LoginFactory
-	DataDir             string
-	DownloadsDir        string // empty: <DataDir>/downloads
-	Port                int
-	Static              fs.FS
-	CookieName          string
-	SessionTTL          time.Duration
-	SecureCookies       bool
-	DevMode             bool
-	Output              io.Writer
-	Restart             func()
-	MCPIssuer           string
+	HTTP                   HTTPOptions
+	AccountFactory         engine.Factory
+	AccountLoginFactory    telegram.LoginFactory
+	DataDir                string
+	DownloadsDir           string // empty: <DataDir>/downloads
+	Port                   int
+	Static                 fs.FS
+	CookieName             string
+	SessionTTL             time.Duration
+	SecureCookies          bool
+	DevMode                bool
+	Output                 io.Writer
+	Restart                func()
+	MCPIssuer              string
+	RequireMonitorForwards bool
 }
 type App struct {
 	devMode           bool
@@ -58,6 +59,7 @@ type App struct {
 	webPolicy         webPolicyCache
 	apiRL             *rateLimiter
 	monitor           *engine.Controller
+	gateForwards      bool
 	forwarder         forwardSender
 	forwardActivityMu sync.Mutex
 	activeForwards    map[string]int
@@ -240,8 +242,9 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		ttl = 7 * 24 * time.Hour
 	}
 	read := dbread.NewHandler(filepath.Join(cfg.DataDir, "db.sqlite"), nil)
-	a := &App{devMode: cfg.DevMode, db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, mcpControl: mcpControl, mcpIssuer: cfg.MCPIssuer, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("updateStatus"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbsRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
+	a := &App{devMode: cfg.DevMode, db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, mcpControl: mcpControl, mcpIssuer: cfg.MCPIssuer, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("updateStatus"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
 	a.restart = cfg.Restart
+	a.gateForwards = cfg.RequireMonitorForwards
 	a.httpOptions, a.proxyPolicy, a.apiRL = cfg.HTTP, proxy, newRateLimiter(10000, time.Minute)
 	a.seekbar = newSeekbarState()
 	a.faces = newFacesService(a)
@@ -298,8 +301,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	mux.Handle("POST /api/downloads/pin", a.requireAdmin(http.HandlerFunc(a.handleBatchPin)))
 	mux.Handle("POST /api/downloads/{id}/pin", a.requireAdmin(http.HandlerFunc(a.handlePin)))
 	mux.Handle("POST /api/forward-queue", a.requireAdmin(http.HandlerFunc(a.handleManualForwardEnqueue)))
+	mux.Handle("POST /api/forward-queue/pause", a.requireAdmin(http.HandlerFunc(a.handleForwardQueuePause)))
+	mux.Handle("POST /api/forward-queue/resume", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueResume)))
 	mux.Handle("POST /api/forward-queue/retry-all", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueRetryAll)))
 	mux.Handle("POST /api/forward-queue/{id}/retry", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueRetry)))
+	mux.Handle("POST /api/forward-queue/{id}/reconcile", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueReconcile)))
 	mux.Handle("PUT /api/forwarding/default-protection", a.requireAdmin(http.HandlerFunc(a.handleGlobalForwardProtection)))
 	mux.Handle("GET /api/jobs", a.requireSession(http.HandlerFunc(a.handleJobs)))
 	mux.Handle("GET /api/jobs/{id}", a.requireSession(http.HandlerFunc(a.handleJob)))

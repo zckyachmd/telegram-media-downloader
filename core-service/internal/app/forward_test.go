@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -17,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/mcpcontrol"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
@@ -141,6 +144,632 @@ func TestForwardProtectionInheritanceAndCaptionMethod(t *testing.T) {
 	}
 	if normalized, err := normalizedAutoForward(nil, map[string]any{"directForward": false}); err != nil || normalized["directForward"] != false {
 		t.Fatalf("direct forward opt-out was not preserved: %#v, %v", normalized, err)
+	}
+}
+
+func TestDirectScanQueueIsDurableIdempotentAndDoesNotCreateDownloadWork(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, accountID, ok := directScanSettings(cfg, "-1000000000123")
+	if !ok || accountID != "acct2" {
+		t.Fatalf("direct scan settings=%v account=%q ok=%v", settings, accountID, ok)
+	}
+	message := docMessage(712, 123, 991, "captured message")
+	if err := a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, message); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, message); err != nil {
+		t.Fatal(err)
+	}
+	var jobs, work int
+	var filePath, stage string
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*),MAX(file_path),MAX(stage) FROM tgdl_forward_queue WHERE group_id=? AND message_id=?`, "-1000000000123", 712).Scan(&jobs, &filePath, &stage); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE group_id=? AND message_id=?`, "-1000000000123", 712).Scan(&work); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 1 || filePath != "" || stage != "scan_direct" || work != 0 {
+		t.Fatalf("jobs=%d path=%q stage=%q download work=%d", jobs, filePath, stage, work)
+	}
+}
+
+func TestDirectScanBackfillRemainsDedupedAfterForwardCompletes(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, accountID, ok := directScanSettings(cfg, "-1000000000123")
+	if !ok {
+		t.Fatal("direct scan settings not found")
+	}
+	message := docMessage(719, 123, 995, "captured message")
+	if err := a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, message); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET stage='complete',status='forwarded' WHERE group_id=? AND message_id=?`, "-1000000000123", message.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, message); err != nil {
+		t.Fatal(err)
+	}
+	var jobs int
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_forward_queue WHERE group_id=? AND message_id=?`, "-1000000000123", message.ID).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 1 {
+		t.Fatalf("completed direct-forward job was enqueued again: jobs=%d", jobs)
+	}
+}
+
+func TestLiveDirectScanRouteBypassesLocalMediaDownload(t *testing.T) {
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
+	var downloads atomic.Int32
+	transport := mediaTransport(func(context.Context, telegram.Attachment, io.Writer) error {
+		downloads.Add(1)
+		return errors.New("direct route must not download")
+	})
+	work := &engine.Work{GroupID: "-1000000000123", GroupName: "Source", AccountID: "acct1", Origin: "live"}
+	if err := a.ingestWorkWithForward(context.Background(), work, docMessage(715, 123, 993, ""), transport, nil); err != nil {
+		t.Fatal(err)
+	}
+	var queued, downloadWork int
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM tgdl_forward_queue WHERE group_id=? AND message_id=? AND stage='scan_direct'`, work.GroupID, 715).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM tgdl_work WHERE group_id=? AND message_id=?`, work.GroupID, 715).Scan(&downloadWork); err != nil {
+		t.Fatal(err)
+	}
+	if downloads.Load() != 0 || queued != 1 || downloadWork != 0 {
+		t.Fatalf("downloads=%d forward jobs=%d download jobs=%d", downloads.Load(), queued, downloadWork)
+	}
+}
+
+func TestLiveBothScanRouteQueuesDownloadAndForwardWithoutDuplicateForward(t *testing.T) {
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "both"})
+	work := &engine.Work{GroupID: "-1000000000123", GroupName: "Source", AccountID: "acct1", Origin: "live"}
+	if err := a.ingestWorkWithForward(context.Background(), work, docMessage(716, 123, 994, ""), fiveBytes, nil); err != nil {
+		t.Fatal(err)
+	}
+	var forwards, downloads int
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM tgdl_forward_queue WHERE group_id=? AND message_id=?`, work.GroupID, 716).Scan(&forwards); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM downloads WHERE group_id=? AND message_id=?`, work.GroupID, 716).Scan(&downloads); err != nil {
+		t.Fatal(err)
+	}
+	if forwards != 1 || downloads != 1 {
+		var stages []string
+		rows, _ := a.db.Reader.Query(`SELECT stage FROM tgdl_forward_queue WHERE group_id=? AND message_id=?`, work.GroupID, 716)
+		for rows.Next() {
+			var stage string
+			_ = rows.Scan(&stage)
+			stages = append(stages, stage)
+		}
+		rows.Close()
+		t.Fatalf("forward jobs=%d stages=%v local downloads=%d", forwards, stages, downloads)
+	}
+}
+
+func TestDirectScanQueueCapacityRetainsOverflowWithoutBlockingDownloadQueue(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
+	now := time.Now().UnixMilli()
+	for messageID := int64(1); messageID <= 256; messageID++ {
+		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,message_id,status,stage,created_at,updated_at) VALUES('-1000000000999',?,'processing','capacity_fixture',?,?)`, messageID, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, accountID, ok := directScanSettings(cfg, "-1000000000123")
+	if !ok {
+		t.Fatal("direct route settings missing")
+	}
+	if err = a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, docMessage(718, 123, 996, "")); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT status FROM tgdl_forward_queue WHERE group_id='-1000000000123' AND message_id=718`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	var downloadWork int
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT count(*) FROM tgdl_work WHERE group_id='-1000000000123' AND message_id=718`).Scan(&downloadWork); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || downloadWork != 0 {
+		t.Fatalf("overflow status=%q download work=%d", status, downloadWork)
+	}
+}
+
+func TestRetryAfterPartialMultiDestinationSuccessSkipsDeliveredDestination(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "scanRoute": "direct"})
+	settings := map[string]any{"enabled": true, "scanRoute": "direct", "routes": []any{
+		map[string]any{"destination": "@Delivered", "captionMode": "native"},
+		map[string]any{"destination": "@Pending", "captionMode": "native"},
+	}}
+	job := forwardJob{groupID: "-1000000000123", groupName: "Source", messageID: 719, settings: settings, accountID: "acct2", stage: "scan_direct", destinations: []forwardDestination{
+		{Settings: map[string]any{"destination": "@Delivered", "captionMode": "native"}, Status: "forwarded"},
+		{Settings: map[string]any{"destination": "@Pending", "captionMode": "native"}, Status: "pending"},
+	}}
+	a.forward(ctx, job)
+	forwards := fake.forwards()
+	if len(forwards) != 1 || forwards[0].Destination != "@Pending" {
+		t.Fatalf("retry re-sent delivered destination: %+v", forwards)
+	}
+}
+
+func TestSafeForwardReasonRedactsPathsAndCredentialFields(t *testing.T) {
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	got := a.safeForwardReason("open /Users/test/data/session.json api_hash=secret-value")
+	if strings.Contains(got, "/Users/") || strings.Contains(got, "secret-value") || !strings.Contains(got, "[redacted]") {
+		t.Fatalf("unsafe forward reason: %q", got)
+	}
+}
+
+func TestForwardClaimHasIndependentPauseAndPersistentRetryDueTime(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	now := time.Now().UnixMilli()
+	forwardConfig, _ := json.Marshal(forwardConfigSnapshot{Settings: map[string]any{"enabled": true, "destination": "@Archive"}})
+	if _, err := a.db.Writer.Exec(`INSERT INTO tgdl_forward_queue(group_id,message_id,facts_json,forward_config_json,destinations_json,status,stage,created_at,updated_at,retry_at) VALUES('-1000000000123',714,'{}',?,'[]','pending','scan_direct',?,?,?)`, string(forwardConfig), now, now, now+60_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_queue_state SET paused=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if job, err := a.claimForward(ctx); err != nil || job != nil {
+		t.Fatalf("future retry claimed: job=%v err=%v", job, err)
+	}
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_queue_state SET paused=0 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_forward_queue_state SET paused=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_forward_queue SET retry_at=? WHERE message_id=714`, now-1); err != nil {
+		t.Fatal(err)
+	}
+	if job, err := a.claimForward(ctx); err != nil || job != nil {
+		t.Fatalf("paused forward bucket claimed: job=%v err=%v", job, err)
+	}
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_forward_queue_state SET paused=0 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	job, err := a.claimForward(ctx)
+	if err != nil || job == nil || job.messageID != 714 {
+		t.Fatalf("due forward job not claimed after independent resume: job=%+v err=%v", job, err)
+	}
+}
+
+func TestForwardClaimReleasedWhenPacingDelayIsCancelled(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	now := time.Now().UnixMilli()
+	result, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,message_id,status,attempts,created_at,updated_at) VALUES('-1000000000123',722,'processing',2,?,?)`, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := a.releaseForwardClaim(cancelled, id, ""); err != nil {
+		t.Fatal(err)
+	}
+	var status, reason string
+	var attempts int
+	var retryAt int64
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,reason,attempts,retry_at FROM tgdl_forward_queue WHERE id=?`, id).Scan(&status, &reason, &attempts, &retryAt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || reason != "" || attempts != 2 || retryAt != 0 {
+		t.Fatalf("cancelled pre-send claim was lost: status=%q reason=%q attempts=%d retryAt=%d", status, reason, attempts, retryAt)
+	}
+}
+
+func TestForwardClaimReturnsToPendingWhenEngineStopsAfterClaim(t *testing.T) {
+	ctx := context.Background()
+	a, err := New(ctx, Config{DataDir: t.TempDir(), Output: io.Discard, RequireMonitorForwards: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	if a.forwardEngineReady() {
+		t.Fatal("stopped engine was considered ready")
+	}
+	now := time.Now().UnixMilli()
+	result, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,message_id,status,attempts,created_at,updated_at) VALUES('-1000000000123',724,'processing',2,?,?)`, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	if err := a.releaseForwardClaim(ctx, id, "Waiting for monitor to start"); err != nil {
+		t.Fatal(err)
+	}
+	var status, reason string
+	var attempts int
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,reason,attempts FROM tgdl_forward_queue WHERE id=?`, id).Scan(&status, &reason, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || reason != "Waiting for monitor to start" || attempts != 2 {
+		t.Fatalf("stopped-engine claim was not preserved: status=%q reason=%q attempts=%d", status, reason, attempts)
+	}
+}
+
+func TestCancelledForwardAccountWaitIsRetryableNotUncertain(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, accountID, ok := directScanSettings(cfg, "-1000000000123")
+	if !ok {
+		t.Fatal("direct scan settings not found")
+	}
+	message := docMessage(723, 123, 996, "")
+	if err := a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, message); err != nil {
+		t.Fatal(err)
+	}
+	job, err := a.claimForward(ctx)
+	if err != nil || job == nil {
+		t.Fatalf("claim job=%v err=%v", job, err)
+	}
+	if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_account_limits(account_id,blocked_until) VALUES(?,?)`, accountID, time.Now().Add(time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	forwardCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		a.forward(forwardCtx, *job)
+		close(done)
+	}()
+	eventually(t, "forward destination entering pre-send wait", func() bool {
+		var states string
+		if err := a.db.Reader.QueryRowContext(ctx, `SELECT destinations_json FROM tgdl_forward_queue WHERE id=?`, job.queueID).Scan(&states); err != nil {
+			return false
+		}
+		return strings.Contains(states, `"status":"processing"`)
+	})
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("cancelled forward did not finish")
+	}
+	if got := fake.forwards(); len(got) != 0 {
+		t.Fatalf("cancelled pre-send wait called Telegram: %+v", got)
+	}
+	var status, raw string
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,destinations_json FROM tgdl_forward_queue WHERE id=?`, job.queueID).Scan(&status, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var destinations []forwardDestination
+	if err := json.Unmarshal([]byte(raw), &destinations); err != nil {
+		t.Fatal(err)
+	}
+	if status != "interrupted" || len(destinations) != 1 || destinations[0].Status != "pending" {
+		t.Fatalf("pre-send cancellation is not retryable: status=%q destinations=%+v", status, destinations)
+	}
+}
+
+func TestForwardPacingConfigDefaultsAndAppearsInQueueSnapshot(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	if got := a.forwarderConfig(ctx).intervalSec; got != 1 {
+		t.Fatalf("default forward gap=%d, want 1 second", got)
+	}
+	snapshot, err := a.forwardQueueSnapshot(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot["intervalSec"] != 1 {
+		t.Fatalf("forward queue snapshot interval=%v, want 1", snapshot["intervalSec"])
+	}
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanced, _ := cfg["advanced"].(map[string]any)
+	if advanced == nil {
+		advanced = map[string]any{}
+		cfg["advanced"] = advanced
+	}
+	advanced["forwarder"] = map[string]any{"intervalSec": 7}
+	if err := a.config.Save(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.forwarderConfig(ctx).intervalSec; got != 7 {
+		t.Fatalf("configured forward gap=%d, want 7 seconds", got)
+	}
+}
+
+func TestForwardWorkerLeavesJobsPendingUntilMonitorRuns(t *testing.T) {
+	ctx := context.Background()
+	a, err := New(ctx, Config{DataDir: t.TempDir(), Output: io.Discard, RequireMonitorForwards: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { a.Close() })
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg["groups"] = []any{map[string]any{
+		"id": "-1000000000123", "name": "Source", "enabled": true,
+		"autoForward": map[string]any{"enabled": true, "destination": "@Archive", "directForward": true, "deleteAfterForward": true},
+	}}
+	if err := a.config.Save(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.monitor.RequireRunning(); err == nil {
+		t.Fatal("monitor unexpectedly running")
+	}
+	a.queueForward(forwardJob{groupID: "-1000000000123", groupName: "Source", messageID: 999, stage: "scan_direct"})
+
+	workerCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		a.runForwards(workerCtx)
+		close(done)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	var status string
+	if err := a.db.Reader.QueryRow(`SELECT status FROM tgdl_forward_queue WHERE message_id=999`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	var reason string
+	if err := a.db.Reader.QueryRow(`SELECT attempts,reason FROM tgdl_forward_queue WHERE message_id=999`).Scan(&attempts, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || attempts != 0 || reason != "" {
+		t.Fatalf("status=%q attempts=%d reason=%q; want untouched pending job", status, attempts, reason)
+	}
+}
+
+func TestForwardEngineStopAfterClaimReturnsJobToPending(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "directForward": true, "deleteAfterForward": true})
+	fake.fail(engine.ErrEngineNotRunning)
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupSettings, accountID, _ := forwardSettings(cfg, "-1000000000123")
+	job := forwardJob{queueID: 123, groupID: "-1000000000123", groupName: "Source", messageID: 998, stage: "scan_direct", settings: groupSettings, accountID: accountID, destinations: []forwardDestination{{}}}
+	if _, err := a.db.Writer.Exec(`INSERT INTO tgdl_forward_queue(id,group_id,group_name,message_id,facts_json,forward_config_json,destinations_json,status,stage,created_at,updated_at) VALUES(123,?,?,?,?,?,'[]','processing','scan_direct',?,?)`, job.groupID, job.groupName, job.messageID, "{}", "{}", time.Now().UnixMilli(), time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	a.forward(ctx, job)
+
+	var status, reason, rawDestinations string
+	var attempts int
+	if err := a.db.Reader.QueryRow(`SELECT status,reason,attempts,destinations_json FROM tgdl_forward_queue WHERE id=?`, job.queueID).Scan(&status, &reason, &attempts, &rawDestinations); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || attempts != 0 || reason != "Waiting for monitor to start" || len(fake.forwards()) != 1 {
+		t.Fatalf("status=%q reason=%q attempts=%d send calls=%d", status, reason, attempts, len(fake.forwards()))
+	}
+	var destinations []forwardDestination
+	if err := json.Unmarshal([]byte(rawDestinations), &destinations); err != nil || len(destinations) != 1 || destinations[0].Status != "pending" || destinations[0].DirectFailed {
+		t.Fatalf("destination state=%+v err=%v", destinations, err)
+	}
+}
+
+func TestForwardClaimFailsLegacyJobWithoutDestinationSnapshotClosed(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@NewConfigTarget"})
+	now := time.Now().UnixMilli()
+	result, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,message_id,facts_json,forward_config_json,destinations_json,status,stage,created_at,updated_at) VALUES('-1000000000123',720,'{}','{}','[]','processing','legacy',?,?)`, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := result.LastInsertId()
+	a.failClaimedForward(ctx, id, "saved destination snapshot is unavailable; requeue after reviewing the destination")
+	var status, reason string
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,reason FROM tgdl_forward_queue WHERE id=?`, id).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" || !strings.Contains(reason, "destination snapshot is unavailable") {
+		t.Fatalf("legacy queue status=%q reason=%q", status, reason)
+	}
+}
+
+func TestForwardFloodWaitGateIsSharedByAccountAndCancelable(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	a.blockForwardAccount(ctx, "acct2", 2*time.Second)
+	var blockedUntil int64
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT blocked_until FROM tgdl_forward_account_limits WHERE account_id='acct2'`).Scan(&blockedUntil); err != nil {
+		t.Fatal(err)
+	}
+	if blockedUntil <= time.Now().UnixMilli() {
+		t.Fatalf("flood deadline not persisted: %d", blockedUntil)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+	if err := a.waitForwardAccount(waitCtx, "acct2"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("account gate error=%v", err)
+	}
+	if err := a.waitForwardAccount(ctx, "acct3"); err != nil {
+		t.Fatalf("unthrottled account blocked: %v", err)
+	}
+}
+
+func TestForwardSnapshotPaginationAndAuthorizationCheckOffPageDestinations(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
+	states, _ := json.Marshal([]forwardDestination{{Settings: map[string]any{"destination": "@Secret"}, Status: "pending"}})
+	config, _ := json.Marshal(forwardConfigSnapshot{Settings: map[string]any{"enabled": true, "destination": "@Secret"}, AccountID: "acct2", Destinations: []forwardDestination{{Settings: map[string]any{"destination": "@Secret"}, Status: "pending"}}})
+	now := time.Now().UnixMilli()
+	var offPageID int64
+	for messageID := int64(1); messageID <= 51; messageID++ {
+		result, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,message_id,facts_json,forward_config_json,destinations_json,status,stage,created_at,updated_at) VALUES(?,?, '{}',?,?,'failed','scan_direct',?,?)`, "-1000000000123", messageID, string(config), string(states), now, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if messageID == 1 {
+			offPageID, _ = result.LastInsertId()
+		}
+	}
+	first, err := a.forwardQueueSnapshot(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first["items"].([]map[string]any)) != forwardQueuePageSize || first["hasMore"] != true {
+		t.Fatalf("first-page pagination=%v", first)
+	}
+	second, err := a.forwardQueueSnapshot(ctx, forwardQueuePageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := second["items"].([]map[string]any)
+	if len(items) != 1 || items[0]["id"] != offPageID || second["hasMore"] != false {
+		var firstID any
+		if len(items) > 0 {
+			firstID = items[0]["id"]
+		}
+		t.Fatalf("second-page items=%d id=%v expected=%d hasMore=%v", len(items), firstID, offPageID, second["hasMore"])
+	}
+	for _, chat := range []string{"-1000000000123", "@Secret"} {
+		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO chat_access(chat_id,state,accounts,checked_at,updated_at) VALUES(?,'ok','{"acct2":{}}',?,?)`, chat, now, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	agent := mcpcontrol.Agent{AccountIDs: []string{"acct2"}, ChatIDs: []string{"-1000000000123"}}
+	if err := a.authorizeMCPForwardJob(ctx, agent, offPageID); err == nil {
+		t.Fatal("off-page destination escaped authorization")
+	}
+	agent.ChatIDs = append(agent.ChatIDs, "@Secret")
+	if err := a.authorizeMCPForwardJob(ctx, agent, offPageID); err != nil {
+		t.Fatalf("fully authorized off-page job rejected: %v", err)
+	}
+}
+
+func TestUncertainForwardResendNeedsExplicitDuplicateRiskConfirmationAndAudit(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, accountID, _ := directScanSettings(cfg, "-1000000000123")
+	states := []forwardDestination{{Settings: map[string]any{"destination": "@Archive"}, Status: "uncertain"}, {Settings: map[string]any{"destination": "@Archive2"}, Status: "uncertain"}}
+	stateJSON, _ := json.Marshal(states)
+	configJSON, _ := json.Marshal(forwardConfigSnapshot{Settings: settings, AccountID: accountID, Destinations: states})
+	now := time.Now().UnixMilli()
+	if _, err = a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,facts_json,forward_config_json,destinations_json,status,stage,created_at,updated_at) VALUES('-1000000000123','Source',713,'{}',?,?,'uncertain','scan_direct',?,?)`, string(configJSON), string(stateJSON), now, now); err != nil {
+		t.Fatal(err)
+	}
+	var id int64
+	var raw string
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT id,destinations_json FROM tgdl_forward_queue WHERE group_id=? AND message_id=?`, "-1000000000123", 713).Scan(&id, &raw); err != nil {
+		t.Fatal(err)
+	}
+	request := func(action string, confirm bool, index *int) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"action": action, "confirmDuplicateRisk": confirm, "destinationIndex": index})
+		req := httptest.NewRequest(http.MethodPost, "/api/forward-queue/1/reconcile", bytes.NewReader(body))
+		req.SetPathValue("id", strconv.FormatInt(id, 10))
+		recorder := httptest.NewRecorder()
+		a.handleForwardQueueReconcile(recorder, req)
+		return recorder
+	}
+	first := 0
+	second := 1
+	if got := request("resend", false, &first).Code; got != http.StatusBadRequest {
+		t.Fatalf("unconfirmed resend returned %d", got)
+	}
+	if got := request("sent", false, &first).Code; got != http.StatusOK {
+		t.Fatalf("confirm sent returned %d", got)
+	}
+	var afterConfirm string
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT status FROM tgdl_forward_queue WHERE id=?`, id).Scan(&afterConfirm); err != nil || afterConfirm != "uncertain" {
+		t.Fatalf("one target confirmation changed unresolved job to %q: %v", afterConfirm, err)
+	}
+	if recorder := request("resend", true, &second); recorder.Code != http.StatusOK {
+		t.Fatalf("confirmed resend returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var status string
+	var audits, resends int
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT status FROM tgdl_forward_queue WHERE id=?`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*),SUM(action='resend') FROM tgdl_forward_queue_audit WHERE job_id=?`, id).Scan(&audits, &resends); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || audits != 2 || resends != 1 {
+		t.Fatalf("status=%s audit count=%d resend count=%d", status, audits, resends)
+	}
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT destinations_json FROM tgdl_forward_queue WHERE id=?`, id).Scan(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if err = json.Unmarshal([]byte(raw), &states); err != nil || states[0].Status != "forwarded" || states[1].Status != "pending" {
+		t.Fatalf("per-destination states=%+v err=%v", states, err)
+	}
+}
+
+func TestDirectScanWithoutCaptionSkipsCaptionEdit(t *testing.T) {
+	for i, test := range []struct {
+		name, mode, sourceCaption string
+		wantEdit, wantDrop        bool
+	}{
+		{name: "no caption on source", mode: "none", wantDrop: true},
+		{name: "remove existing caption natively", mode: "none", sourceCaption: "source text", wantDrop: true},
+		{name: "preserve native caption", mode: "native", sourceCaption: "source text"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			a, fake := forwardTestApp(t, map[string]any{
+				"enabled": true, "destination": "@Archive", "scanRoute": "direct", "captionMode": test.mode,
+			})
+			cfg, err := a.config.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			settings, accountID, _ := directScanSettings(cfg, "-1000000000123")
+			if err := a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, docMessage(997+i, 123, 77, test.sourceCaption)); err != nil {
+				t.Fatal(err)
+			}
+			eventually(t, "direct scan forward", func() bool { return len(fake.forwards()) == 1 })
+			if request := fake.forwards()[0]; request.EditCaption != test.wantEdit || request.DropMediaCaptions != test.wantDrop {
+				t.Fatalf("EditCaption=%v DropMediaCaptions=%v; want %v/%v: %+v", request.EditCaption, request.DropMediaCaptions, test.wantEdit, test.wantDrop, request)
+			}
+		})
+	}
+}
+
+func TestNoCaptionRetryEditsSavedForwardInsteadOfResending(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{
+		"enabled": true, "destination": "@Archive", "scanRoute": "direct", "captionMode": "none",
+	})
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, accountID, _ := directScanSettings(cfg, "-1000000000123")
+	job := forwardJob{
+		groupID: "-1000000000123", groupName: "Source", messageID: 996, stage: "caption_edit_failed",
+		settings: settings, accountID: accountID,
+		destinations: []forwardDestination{{Settings: map[string]any{"destination": "@Archive", "captionMode": "none"}, Status: "processing", DestinationMessageID: 9001}},
+	}
+	a.forward(ctx, job)
+	requests := fake.forwards()
+	if len(requests) != 1 || !requests[0].EditCaption || requests[0].DropMediaCaptions || requests[0].EditMessageID != 9001 {
+		t.Fatalf("retry request=%+v; want edit existing message 9001 without a new native forward", requests)
 	}
 }
 
@@ -522,6 +1151,77 @@ func TestUnresolvedCustomCaptionWithoutMessageIDDoesNotRetryAsNewForward(t *test
 	})
 	if len(fake.forwards()) != 0 {
 		t.Fatalf("unsafe retry created another forward: %+v", fake.forwards())
+	}
+}
+
+func TestLegacyUncertainForwardNeedsExplicitCurrentTargetForResend(t *testing.T) {
+	ctx := context.Background()
+	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@CurrentTarget"})
+	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue_state SET paused=1 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	ids := make([]int64, 2)
+	for i := range ids {
+		result, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,message_id,forward_config_json,destinations_json,status,stage,created_at,updated_at) VALUES('-1000000000123',?,'{}','[]','uncertain','legacy',?,?)`, 730+i, now, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids[i], _ = result.LastInsertId()
+	}
+	request := func(id int64, action string, confirm bool) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"action": action, "confirmDuplicateRisk": confirm})
+		req := httptest.NewRequest(http.MethodPost, "/api/forward-queue/reconcile", bytes.NewReader(body))
+		req.SetPathValue("id", strconv.FormatInt(id, 10))
+		recorder := httptest.NewRecorder()
+		a.handleForwardQueueReconcile(recorder, req)
+		return recorder
+	}
+	if got := request(ids[0], "resend", false).Code; got != http.StatusBadRequest {
+		t.Fatalf("unconfirmed legacy resend returned %d", got)
+	}
+	if got := request(ids[0], "sent", false).Code; got != http.StatusOK {
+		t.Fatalf("legacy delivery confirmation returned %d", got)
+	}
+	if got := request(ids[1], "resend", true).Code; got != http.StatusOK {
+		t.Fatalf("confirmed legacy resend returned %d", got)
+	}
+	var status, config string
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT status,forward_config_json FROM tgdl_forward_queue WHERE id=?`, ids[1]).Scan(&status, &config); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot forwardConfigSnapshot
+	if err := json.Unmarshal([]byte(config), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || toString(snapshot.Settings["destination"]) != "@CurrentTarget" {
+		t.Fatalf("legacy resend status=%q snapshot=%+v", status, snapshot)
+	}
+}
+
+func TestAmbiguousTelegramResponseStaysUncertainWithoutAutomaticResend(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
+	fake.fail(context.DeadlineExceeded)
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, accountID, _ := directScanSettings(cfg, "-1000000000123")
+	if err = a.queueDirectScan(ctx, "-1000000000123", "Source", accountID, settings, cfg, docMessage(717, 123, 995, "")); err != nil {
+		t.Fatal(err)
+	}
+	job, err := a.claimForward(ctx)
+	if err != nil || job == nil {
+		t.Fatalf("claim job=%+v err=%v", job, err)
+	}
+	a.forward(ctx, *job)
+	var status string
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT status FROM tgdl_forward_queue WHERE id=?`, job.queueID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "uncertain" || len(fake.forwards()) != 1 {
+		t.Fatalf("status=%q native sends=%d", status, len(fake.forwards()))
 	}
 }
 

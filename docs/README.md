@@ -36,6 +36,7 @@ Run it with Docker or as a native binary on Linux, Windows or macOS.
 
 | Page | Covers |
 |---|---|
+| [Scan routing and forward queue](GO-FORWARD-QUEUES.md) | Independent scan routing, retry recovery and uncertain delivery handling |
 | [Architecture](ARCHITECTURE.md) | How the Go server, queue, storage and dashboard fit together |
 | [Developer notes](DEVELOPER-NOTES.md) | Engineering notes from the Go migration and older audits |
 | [Contributing](https://github.com/botnick/telegram-media-downloader/blob/main/CONTRIBUTING.md) | Build, test and send a pull request |

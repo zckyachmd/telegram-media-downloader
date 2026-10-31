@@ -106,11 +106,16 @@ func (a *App) recoverHistoryJobs(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if pending > 0 {
-		a.startHistoryDrain(true)
+	var pendingHistory int
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT count(*) FROM tgdl_work WHERE origin='history' AND status IN ('pending','processing')`).Scan(&pendingHistory); err != nil {
+		return err
 	}
-	// startHistoryWorker and startHistoryDrain respect the persisted Engine
-	// pause gate, so recovered work stays queued after an explicit Stop.
+	if pending > 0 {
+		// Keep unrelated URL/story work recoverable without letting a paused
+		// backfill start the Engine as a side effect.
+		a.startHistoryDrain(len(jobs) == 0 && pendingHistory == 0)
+	}
+	// Workers wait for an explicit Engine start after restart.
 	return nil
 }
 
@@ -147,6 +152,10 @@ func (a *App) handleHistoryStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if offsetDate > 0 && minDate >= offsetDate {
 		writeJSONError(w, 400, "minDate must be earlier than offsetDate")
+		return
+	}
+	if err := a.monitor.RequireRunning(); err != nil {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": "Start the monitor before starting a backfill", "code": "ENGINE_NOT_RUNNING"})
 		return
 	}
 	a.historyMu.Lock()

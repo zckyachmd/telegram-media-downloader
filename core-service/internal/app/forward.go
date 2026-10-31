@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"path"
 	"regexp"
@@ -19,6 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 	"github.com/gotd/td/tg"
@@ -40,6 +42,11 @@ type nativeForwardSender interface {
 	ForwardMessage(context.Context, string, telegram.ForwardMessageRequest) (string, int, error)
 }
 
+var (
+	forwardLocalPathPattern = regexp.MustCompile(`(?:/Users/[^\s,;]+|/home/[^\s,;]+|/private/[^\s,;]+|/tmp/[^\s,;]+|[A-Za-z]:\\[^\s,;]+)`)
+	forwardSecretPattern    = regexp.MustCompile(`(?i)\b(api[_ -]?hash|api[_ -]?id|token|password|session)\b\s*[:=]\s*[^\s,;]+`)
+)
+
 type forwardJob struct {
 	queueID            int64
 	groupID, groupName string
@@ -56,6 +63,10 @@ type forwardJob struct {
 	stage              string
 	destinations       []forwardDestination
 	attempts           int
+	retryAt            int64
+	noAutoRetry        bool
+	waitForEngine      bool
+	retryBeforeSend    bool
 	directForward      func(context.Context, telegram.ForwardMessageRequest) error
 }
 
@@ -227,11 +238,16 @@ func (a *App) reserveForward(job *forwardJob) bool {
 
 func (a *App) updateForwardReservation(ctx context.Context, job forwardJob, status, reason string) {
 	now := time.Now().UnixMilli()
+	reason = a.safeForwardReason(reason)
 	completedAt := now
 	if status == "pending" || status == "processing" {
 		completedAt = 0
 	}
-	_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,updated_at=?,completed_at=? WHERE history_id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), now, completedAt, job.historyID)
+	if job.queueID > 0 {
+		_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,updated_at=?,completed_at=? WHERE id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), now, completedAt, job.queueID)
+	} else {
+		_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,updated_at=?,completed_at=? WHERE history_id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), now, completedAt, job.historyID)
+	}
 	a.notifyForwardQueue()
 }
 
@@ -257,13 +273,24 @@ func (a *App) directForwardNow(ctx context.Context, job *forwardJob) error {
 			}
 			request.EditCaption, request.Caption, request.Entities = true, caption, entities
 		}
+		if err := a.waitForwardAccount(ctx, job.accountID); err != nil {
+			return err
+		}
 		job.destinations[i].Status, job.destinations[i].Method = "processing", "native_forward"
 		a.persistForwardProgress(ctx, *job)
 		forwardErr := job.directForward(ctx, request)
 		job.destinations[i].DestinationMessageID = destinationMessageID
 		if forwardErr != nil {
+			if wait, flood := tgerr.AsFloodWait(forwardErr); flood {
+				a.blockForwardAccount(ctx, job.accountID, wait+time.Second)
+				job.retryAt = time.Now().Add(wait + time.Second).UnixMilli()
+			}
 			job.destinations[i].DirectFailed = true
 			job.destinations[i].Reason = "direct forward failed"
+			if ambiguousDeliveryError(forwardErr) {
+				job.destinations[i].Status = "uncertain"
+				job.destinations[i].Reason = "Telegram response was lost; delivery may have succeeded"
+			}
 			if errors.Is(forwardErr, telegram.ErrForwardCaptionUnresolved) {
 				job.stage = "caption_edit_failed"
 			} else {
@@ -295,14 +322,35 @@ func (a *App) runForwards(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
+				if !a.forwardEngineReady() {
+					select {
+					case <-ctx.Done():
+						return
+					case <-a.forwards:
+					case <-ticker.C:
+					}
+					continue
+				}
 				config := a.forwarderConfig(ctx)
 				current := active.Load()
 				if current < int32(config.concurrency) && active.CompareAndSwap(current, current+1) {
 					job, err := a.claimForward(ctx)
 					if err == nil && job != nil {
-						if a.waitForwardStart(ctx, &scheduleMu, &nextStart, time.Duration(config.intervalSec)*time.Second) {
-							a.notifyForwardQueue()
+						if !a.waitForwardStart(ctx, &scheduleMu, &nextStart, time.Duration(config.intervalSec)*time.Second) {
+							if err := a.releaseForwardClaim(ctx, job.queueID, ""); err != nil && a.output != nil {
+								fmt.Fprintf(a.output, "AutoForward: could not release cancelled forward job: %v\n", err)
+							}
+							active.Add(-1)
+							continue
 						}
+						if !a.forwardEngineReady() {
+							if err := a.releaseForwardClaim(ctx, job.queueID, "Waiting for monitor to start"); err != nil && a.output != nil {
+								fmt.Fprintf(a.output, "AutoForward: could not return job while monitor is stopped: %v\n", err)
+							}
+							active.Add(-1)
+							continue
+						}
+						a.notifyForwardQueue()
 						a.forward(ctx, *job)
 						active.Add(-1)
 						continue
@@ -332,16 +380,31 @@ type forwarderRuntimeConfig struct {
 func (a *App) forwarderConfig(ctx context.Context) forwarderRuntimeConfig {
 	cfg, err := a.config.Load(ctx)
 	if err != nil {
-		return forwarderRuntimeConfig{concurrency: 1, queueSize: 256, floodWaitAttempts: 3}
+		return forwarderRuntimeConfig{concurrency: 1, queueSize: 256, intervalSec: 1, floodWaitAttempts: 3}
 	}
 	advanced, _ := cfg["advanced"].(map[string]any)
 	forwarder, _ := advanced["forwarder"].(map[string]any)
 	return forwarderRuntimeConfig{
 		concurrency:       max(1, min(maxForwardConcurrency, int(number(forwarder["concurrency"], 1)))),
 		queueSize:         max(1, min(10000, int(number(forwarder["queueSize"], 256)))),
-		intervalSec:       max(0, min(3600, int(number(forwarder["intervalSec"], 0)))),
+		intervalSec:       max(0, min(3600, int(number(forwarder["intervalSec"], 1)))),
 		floodWaitAttempts: max(1, min(10, int(number(forwarder["floodWaitAttempts"], 3)))),
 	}
+}
+
+func (a *App) forwardEngineReady() bool {
+	return !a.gateForwards || a.monitor == nil || a.monitor.RequireRunning() == nil
+}
+
+func (a *App) releaseForwardClaim(ctx context.Context, queueID int64, reason string) error {
+	if queueID <= 0 {
+		return nil
+	}
+	if _, err := a.db.Writer.ExecContext(context.WithoutCancel(ctx), `UPDATE tgdl_forward_queue SET status='pending',reason=CASE WHEN ?='' THEN reason ELSE ? END,retry_at=0,updated_at=? WHERE id=? AND status='processing'`, reason, reason, time.Now().UnixMilli(), queueID); err != nil {
+		return err
+	}
+	a.notifyForwardQueue()
+	return nil
 }
 
 func (a *App) waitForwardStart(ctx context.Context, mu *sync.Mutex, next *time.Time, interval time.Duration) bool {
@@ -364,12 +427,44 @@ func (a *App) waitForwardStart(ctx context.Context, mu *sync.Mutex, next *time.T
 	return ctx.Err() == nil
 }
 
+func (a *App) blockForwardAccount(ctx context.Context, accountID string, wait time.Duration) {
+	if accountID == "" || wait <= 0 {
+		return
+	}
+	until := time.Now().Add(wait).UnixMilli()
+	_, _ = a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_account_limits(account_id,blocked_until) VALUES(?,?) ON CONFLICT(account_id) DO UPDATE SET blocked_until=MAX(blocked_until,excluded.blocked_until)`, accountID, until)
+}
+
+func (a *App) waitForwardAccount(ctx context.Context, accountID string) error {
+	if accountID == "" {
+		return nil
+	}
+	for {
+		var until int64
+		if err := a.db.Reader.QueryRowContext(ctx, `SELECT COALESCE((SELECT blocked_until FROM tgdl_forward_account_limits WHERE account_id=?),0)`, accountID).Scan(&until); err != nil {
+			return err
+		}
+		wait := time.Until(time.UnixMilli(until))
+		if wait <= 0 {
+			return nil
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
 func (a *App) claimForward(ctx context.Context) (*forwardJob, error) {
 	var job forwardJob
 	var facts, forwardConfig, destinations string
-	err := a.db.Writer.QueryRowContext(ctx, `UPDATE tgdl_forward_queue SET status='processing',updated_at=? WHERE id=(
-		SELECT id FROM tgdl_forward_queue WHERE status='pending' AND COALESCE((SELECT paused FROM tgdl_queue_state WHERE id=1),0)=0 ORDER BY id LIMIT 1
-	) RETURNING id,history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,destinations_json,attempts`, time.Now().UnixMilli()).Scan(
+	now := time.Now().UnixMilli()
+	err := a.db.Writer.QueryRowContext(ctx, `UPDATE tgdl_forward_queue SET status='processing',retry_at=0,updated_at=? WHERE id=(
+		SELECT id FROM tgdl_forward_queue WHERE status='pending' AND retry_at<=? AND COALESCE((SELECT paused FROM tgdl_forward_queue_state WHERE id=1),0)=0 ORDER BY id LIMIT 1
+	) RETURNING id,history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,destinations_json,attempts`, now, now).Scan(
 		&job.queueID, &job.historyID, &job.groupID, &job.groupName, &job.messageID, &job.fileName, &job.topicID, &job.text, &job.recordID, &job.path, &facts, &forwardConfig, &job.stage, &destinations, &job.attempts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -378,20 +473,29 @@ func (a *App) claimForward(ctx context.Context) (*forwardJob, error) {
 		return nil, err
 	}
 	if err = json.Unmarshal([]byte(facts), &job.facts); err != nil {
-		return nil, err
+		a.failClaimedForward(ctx, job.queueID, "saved forward job data is invalid; requeue after reviewing the destination")
+		return nil, nil
 	}
-	_ = json.Unmarshal([]byte(destinations), &job.destinations)
-	if forwardConfig != "" {
-		var snapshot forwardConfigSnapshot
-		if err = json.Unmarshal([]byte(forwardConfig), &snapshot); err != nil {
-			return nil, err
-		}
-		job.settings, job.accountID = snapshot.Settings, snapshot.AccountID
-		if len(snapshot.Destinations) > 0 && len(job.destinations) == 0 {
-			job.destinations = snapshot.Destinations
-		}
+	if err = json.Unmarshal([]byte(destinations), &job.destinations); err != nil {
+		a.failClaimedForward(ctx, job.queueID, "saved destination state is invalid; requeue after reviewing the destination")
+		return nil, nil
+	}
+	var snapshot forwardConfigSnapshot
+	if forwardConfig == "" || json.Unmarshal([]byte(forwardConfig), &snapshot) != nil || snapshot.Settings == nil || !hasForwardDestination(snapshot.Settings) {
+		a.failClaimedForward(ctx, job.queueID, "saved destination snapshot is unavailable; requeue after reviewing the destination")
+		return nil, nil
+	}
+	job.settings, job.accountID = snapshot.Settings, snapshot.AccountID
+	if len(snapshot.Destinations) > 0 && len(job.destinations) == 0 {
+		job.destinations = snapshot.Destinations
 	}
 	return &job, nil
+}
+
+func (a *App) failClaimedForward(ctx context.Context, id int64, reason string) {
+	now := time.Now().UnixMilli()
+	_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status='failed',reason=?,updated_at=?,completed_at=? WHERE id=? AND status='processing'`, reason, now, now, id)
+	a.notifyForwardQueue()
 }
 
 func (a *App) notifyForwardQueue() {
@@ -501,7 +605,7 @@ func (a *App) handleForwardQueueRetry(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid forward job id")
 		return
 	}
-	res, err := a.db.Writer.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status='pending',reason='',completed_at=0,updated_at=? WHERE id=? AND status IN ('failed','interrupted')`, time.Now().UnixMilli(), id)
+	res, err := a.db.Writer.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status='pending',reason='',retry_at=0,completed_at=0,updated_at=? WHERE id=? AND status IN ('failed','interrupted')`, time.Now().UnixMilli(), id)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -519,8 +623,236 @@ func (a *App) handleForwardQueueRetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"success": true})
 }
 
+func (a *App) setForwardQueuePaused(ctx context.Context, paused bool) error {
+	value := 0
+	if paused {
+		value = 1
+	}
+	if _, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue_state SET paused=? WHERE id=1`, value); err != nil {
+		return err
+	}
+	a.notifyForwardQueue()
+	return nil
+}
+
+func (a *App) handleForwardQueuePause(w http.ResponseWriter, r *http.Request) {
+	if err := a.setForwardQueuePaused(r.Context(), true); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "bucket": "forward", "paused": true})
+}
+
+func (a *App) handleForwardQueueResume(w http.ResponseWriter, r *http.Request) {
+	if err := a.setForwardQueuePaused(r.Context(), false); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	select {
+	case a.forwards <- struct{}{}:
+	default:
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "bucket": "forward", "paused": false})
+}
+
+func (a *App) handleForwardQueueReconcile(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid forward job id")
+		return
+	}
+	var body struct {
+		Action               string `json:"action"`
+		ConfirmDuplicateRisk bool   `json:"confirmDuplicateRisk"`
+		DestinationIndex     *int   `json:"destinationIndex"`
+	}
+	if err := decodeBody(w, r, &body); err != nil {
+		return
+	}
+	if body.Action != "sent" && body.Action != "resend" {
+		writeJSONError(w, http.StatusBadRequest, "action must be sent or resend")
+		return
+	}
+	if body.Action == "resend" && !body.ConfirmDuplicateRisk {
+		writeJSONError(w, http.StatusBadRequest, "resend may create a duplicate; explicit confirmation is required")
+		return
+	}
+	var legacyResendSnapshot *forwardConfigSnapshot
+	if body.Action == "resend" {
+		var raw, forwardConfig, groupID string
+		var topicID int
+		if err := a.db.Reader.QueryRowContext(r.Context(), `SELECT destinations_json,forward_config_json,group_id,topic_id FROM tgdl_forward_queue WHERE id=? AND status='uncertain'`, id).Scan(&raw, &forwardConfig, &groupID, &topicID); err == nil {
+			var destinations []forwardDestination
+			var saved forwardConfigSnapshot
+			snapshotValid := json.Unmarshal([]byte(raw), &destinations) == nil && len(destinations) > 0
+			if !snapshotValid {
+				snapshotValid = json.Unmarshal([]byte(forwardConfig), &saved) == nil && saved.Settings != nil && hasForwardDestination(saved.Settings)
+			}
+			if !snapshotValid {
+				cfg, loadErr := a.config.Load(r.Context())
+				if loadErr != nil {
+					writeJSONError(w, http.StatusInternalServerError, "forward configuration is unavailable")
+					return
+				}
+				settings, accountID, _ := forwardSettings(cfg, groupID)
+				destinations = nil
+				for _, route := range matchingForwardRoutes(settings, topicID) {
+					routeSettings := effectiveForwardProtection(inheritCaptionSettings(route, settings), settings, route, topicID, cfg)
+					destinations = append(destinations, forwardDestination{Settings: routeSettings, Status: "uncertain"})
+				}
+				if len(destinations) == 0 {
+					writeJSONError(w, http.StatusConflict, "legacy forward has no current destination to resend to")
+					return
+				}
+				legacyResendSnapshot = &forwardConfigSnapshot{Settings: settings, AccountID: accountID, Destinations: destinations}
+			}
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			writeJSONError(w, http.StatusInternalServerError, "forward job state is unavailable")
+			return
+		}
+	}
+	tx, err := a.db.Writer.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer tx.Rollback()
+	var raw, forwardConfig, groupID string
+	var topicID int
+	if err = tx.QueryRowContext(r.Context(), `SELECT destinations_json,forward_config_json,group_id,topic_id FROM tgdl_forward_queue WHERE id=? AND status='uncertain'`, id).Scan(&raw, &forwardConfig, &groupID, &topicID); err != nil {
+		writeJSONError(w, http.StatusConflict, "forward job is not uncertain")
+		return
+	}
+	var destinations []forwardDestination
+	if err = json.Unmarshal([]byte(raw), &destinations); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "forward destination state is invalid")
+		return
+	}
+	var saved forwardConfigSnapshot
+	savedSnapshotValid := json.Unmarshal([]byte(forwardConfig), &saved) == nil && saved.Settings != nil && hasForwardDestination(saved.Settings)
+	missingSnapshot := false
+	if len(destinations) == 0 {
+		destinations = saved.Destinations
+		if len(destinations) == 0 && savedSnapshotValid {
+			for _, route := range matchingForwardRoutes(saved.Settings, topicID) {
+				destinations = append(destinations, forwardDestination{Settings: route, Status: "uncertain"})
+			}
+		}
+		if len(destinations) == 0 && !savedSnapshotValid {
+			missingSnapshot = true
+			if body.Action == "resend" {
+				if legacyResendSnapshot == nil || legacyResendSnapshot.Settings == nil {
+					writeJSONError(w, http.StatusConflict, "legacy forward snapshot is unavailable; refresh and retry")
+					return
+				}
+				destinations = legacyResendSnapshot.Destinations
+				saved = *legacyResendSnapshot
+			}
+		}
+	}
+	for i := range destinations {
+		if destinations[i].Status == "pending" || destinations[i].Status == "processing" {
+			destinations[i].Status = "uncertain"
+		}
+	}
+	if body.DestinationIndex != nil && (*body.DestinationIndex < 0 || *body.DestinationIndex >= len(destinations)) {
+		writeJSONError(w, http.StatusBadRequest, "destination index is invalid")
+		return
+	}
+	changed := false
+	for i := range destinations {
+		if body.DestinationIndex != nil && i != *body.DestinationIndex {
+			continue
+		}
+		if destinations[i].Status != "uncertain" && destinations[i].Status != "processing" {
+			continue
+		}
+		changed = true
+		if body.Action == "sent" {
+			destinations[i].Status = "forwarded"
+			destinations[i].Reason = "operator confirmed delivered"
+		} else {
+			destinations[i].Status = "pending"
+			destinations[i].Reason = "operator requested resend"
+		}
+	}
+	if body.DestinationIndex == nil && !changed && body.Action == "resend" {
+		for i := range destinations {
+			if destinations[i].Status == "forwarded" {
+				continue
+			}
+			destinations[i].Status = "pending"
+			destinations[i].Reason = "operator requested resend"
+			changed = true
+		}
+	}
+	if body.DestinationIndex == nil && !changed && body.Action == "sent" && missingSnapshot {
+		changed = true
+	}
+	if !changed {
+		writeJSONError(w, http.StatusConflict, "forward job has no uncertain destination")
+		return
+	}
+	status := "pending"
+	for _, destination := range destinations {
+		if destination.Status == "uncertain" || destination.Status == "processing" {
+			status = "uncertain"
+			break
+		}
+	}
+	if status != "uncertain" && body.Action == "sent" {
+		status = "forwarded"
+		for _, destination := range destinations {
+			if destination.Status != "forwarded" {
+				status = "pending"
+				break
+			}
+		}
+	}
+	destinationJSON, _ := json.Marshal(destinations)
+	savedConfigToPersist := forwardConfig
+	if missingSnapshot && body.Action == "resend" {
+		encodedConfig, _ := json.Marshal(saved)
+		savedConfigToPersist = string(encodedConfig)
+	}
+	now := time.Now().UnixMilli()
+	if _, err = tx.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status=?,reason='',retry_at=0,forward_config_json=?,destinations_json=?,updated_at=?,completed_at=CASE WHEN ?='forwarded' THEN ? ELSE 0 END WHERE id=? AND status='uncertain'`, status, savedConfigToPersist, string(destinationJSON), now, status, now, id); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	detail := "operator confirmed delivery"
+	if body.Action == "resend" {
+		detail = "operator requested resend after explicit duplicate-risk confirmation"
+	}
+	if body.DestinationIndex != nil {
+		detail = fmt.Sprintf("destination %d: %s", *body.DestinationIndex, detail)
+	}
+	if missingSnapshot {
+		detail = "legacy job had no saved destination snapshot; " + detail
+		if body.Action == "resend" {
+			detail += " using destinations explicitly accepted from current configuration"
+		}
+	}
+	if _, err = tx.ExecContext(r.Context(), `INSERT INTO tgdl_forward_queue_audit(job_id,action,created_at,detail) VALUES(?,?,?,?)`, id, body.Action, now, detail); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err = tx.Commit(); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	a.notifyForwardQueue()
+	if status == "pending" {
+		select {
+		case a.forwards <- struct{}{}:
+		default:
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "status": status, "warning": "Telegram does not provide enough evidence to guarantee exactly-once delivery."})
+}
+
 func (a *App) handleForwardQueueRetryAll(w http.ResponseWriter, r *http.Request) {
-	res, err := a.db.Writer.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status='pending',reason='',completed_at=0,updated_at=? WHERE status IN ('failed','interrupted')`, time.Now().UnixMilli())
+	res, err := a.db.Writer.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status='pending',reason='',retry_at=0,completed_at=0,updated_at=? WHERE status IN ('failed','interrupted')`, time.Now().UnixMilli())
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -545,8 +877,13 @@ func (a *App) finishForwardQueue(ctx context.Context, job forwardJob, status, re
 		return
 	}
 	now := time.Now().UnixMilli()
+	reason = a.safeForwardReason(reason)
 	destinations, _ := json.Marshal(job.destinations)
-	_, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=CASE WHEN ?='' THEN reason ELSE ? END,stage=?,destinations_json=?,attempts=?,updated_at=?,completed_at=? WHERE id=?`, status, reason, reason, job.stage, string(destinations), job.attempts, now, now, job.queueID)
+	completedAt := now
+	if status == "pending" || status == "processing" {
+		completedAt = 0
+	}
+	_, err := a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=CASE WHEN ?='' THEN reason ELSE ? END,stage=?,destinations_json=?,attempts=?,retry_at=?,updated_at=?,completed_at=? WHERE id=?`, status, reason, reason, job.stage, string(destinations), job.attempts, job.retryAt, now, completedAt, job.queueID)
 	if err != nil && a.output != nil {
 		fmt.Fprintf(a.output, "AutoForward: could not record queue status for %s: %v\n", job.fileName, err)
 	}
@@ -560,22 +897,22 @@ func (a *App) forwardQueueSnapshot(ctx context.Context, offset int) (map[string]
 		offset = 0
 	}
 	var stats struct {
-		Total, Pending, Active, Forwarded, Failed, Interrupted, NotApplicable int64
+		Total, Pending, Active, Forwarded, Failed, Interrupted, Uncertain, NotApplicable int64
 	}
 	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(status='pending'),0),COALESCE(SUM(status='processing'),0),
-		COALESCE(SUM(status='forwarded'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(status='interrupted'),0),COALESCE(SUM(status='not_applicable'),0)
-		FROM tgdl_forward_queue`).Scan(&stats.Total, &stats.Pending, &stats.Active, &stats.Forwarded, &stats.Failed, &stats.Interrupted, &stats.NotApplicable); err != nil {
+		COALESCE(SUM(status='forwarded'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(status='interrupted'),0),COALESCE(SUM(status='uncertain'),0),COALESCE(SUM(status='not_applicable'),0)
+		FROM tgdl_forward_queue`).Scan(&stats.Total, &stats.Pending, &stats.Active, &stats.Forwarded, &stats.Failed, &stats.Interrupted, &stats.Uncertain, &stats.NotApplicable); err != nil {
 		return nil, err
 	}
-	actionable := stats.Pending + stats.Active + stats.Failed + stats.Interrupted
+	actionable := stats.Pending + stats.Active + stats.Failed + stats.Interrupted + stats.Uncertain
 	if actionable == 0 {
 		offset = 0
 	} else if int64(offset) >= actionable {
 		offset = int((actionable - 1) / forwardQueuePageSize * forwardQueuePageSize)
 	}
-	rows, err := a.db.Reader.QueryContext(ctx, `SELECT id,group_id,group_name,message_id,file_name,topic_id,status,reason,created_at,forward_config_json,stage,destinations_json FROM tgdl_forward_queue
-		WHERE status IN ('pending','processing') OR status IN ('failed','interrupted')
-		ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 ELSE 2 END,id DESC LIMIT ? OFFSET ?`, forwardQueuePageSize, offset)
+	rows, err := a.db.Reader.QueryContext(ctx, `SELECT id,group_id,group_name,message_id,file_name,topic_id,status,reason,created_at,forward_config_json,stage,destinations_json,attempts,retry_at FROM tgdl_forward_queue
+		WHERE status IN ('pending','processing','failed','interrupted','uncertain')
+		ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 WHEN 'uncertain' THEN 2 ELSE 3 END,id DESC LIMIT ? OFFSET ?`, forwardQueuePageSize, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +925,9 @@ func (a *App) forwardQueueSnapshot(ctx context.Context, offset int) (map[string]
 		var messageID int64
 		var topicID int
 		var createdAt int64
-		if err := rows.Scan(&queueID, &groupID, &groupName, &messageID, &fileName, &topicID, &status, &reason, &createdAt, &forwardConfig, &stage, &destinationsJSON); err != nil {
+		var attempts int
+		var retryAt int64
+		if err := rows.Scan(&queueID, &groupID, &groupName, &messageID, &fileName, &topicID, &status, &reason, &createdAt, &forwardConfig, &stage, &destinationsJSON, &attempts, &retryAt); err != nil {
 			return nil, err
 		}
 		var destinations []string
@@ -610,12 +949,19 @@ func (a *App) forwardQueueSnapshot(ctx context.Context, offset int) (map[string]
 		}
 		var destinationStates []forwardDestination
 		_ = json.Unmarshal([]byte(destinationsJSON), &destinationStates)
-		items = append(items, map[string]any{"id": queueID, "groupId": groupID, "groupName": groupName, "messageId": messageID, "fileName": fileName, "topicId": topicID, "destinations": destinations, "destinationStates": destinationStates, "stage": stage, "status": status, "reason": reason, "createdAt": createdAt})
+		items = append(items, map[string]any{"id": queueID, "groupId": groupID, "groupName": groupName, "messageId": messageID, "fileName": fileName, "topicId": topicID, "destinations": destinations, "destinationStates": destinationStates, "stage": stage, "status": status, "reason": a.safeForwardReason(reason), "attempts": attempts, "retryAt": retryAt, "createdAt": createdAt})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return map[string]any{"total": stats.Total - stats.NotApplicable, "pending": stats.Pending, "active": stats.Active, "forwarded": stats.Forwarded, "failed": stats.Failed, "interrupted": stats.Interrupted, "notApplicable": stats.NotApplicable, "page": offset/forwardQueuePageSize + 1, "pageSize": forwardQueuePageSize, "items": items}, nil
+	var paused int
+	_ = a.db.Reader.QueryRowContext(ctx, `SELECT paused FROM tgdl_forward_queue_state WHERE id=1`).Scan(&paused)
+	config := a.forwarderConfig(ctx)
+	workerStatus := "running"
+	if paused != 0 {
+		workerStatus = "paused"
+	}
+	return map[string]any{"total": stats.Total - stats.NotApplicable, "pending": stats.Pending, "active": stats.Active, "forwarded": stats.Forwarded, "failed": stats.Failed, "interrupted": stats.Interrupted, "uncertain": stats.Uncertain, "paused": paused != 0, "workerStatus": workerStatus, "concurrency": config.concurrency, "capacity": config.queueSize, "intervalSec": config.intervalSec, "notApplicable": stats.NotApplicable, "page": offset/forwardQueuePageSize + 1, "pageSize": forwardQueuePageSize, "hasMore": int64(offset+len(items)) < actionable, "items": items}, nil
 }
 
 // forwardSettings returns the chat's autoForward rule and forward account, or
@@ -695,6 +1041,10 @@ func normalizedAutoForward(existing, value any) (map[string]any, error) {
 		out["directForward"] = false
 	} else {
 		out["directForward"] = enabled
+	}
+	scanRoute := toString(out["scanRoute"])
+	if scanRoute != "" && scanRoute != "download" && scanRoute != "direct" && scanRoute != "both" {
+		return nil, errors.New("autoForward scanRoute must be download, direct, or both")
 	}
 	if out["deleteAfterForward"] != true || protectionValue(out["protect"]) == 1 {
 		out["directForward"] = false
@@ -888,23 +1238,33 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 			status = "interrupted"
 			reason = ctx.Err().Error()
 		}
+		if job.waitForEngine && ctx.Err() == nil {
+			status = "pending"
+			reason = "Waiting for monitor to start"
+			job.attempts = max(0, job.attempts-1)
+			job.retryAt = 0
+		}
+		if job.retryBeforeSend {
+			if ctx.Err() == nil {
+				status = "pending"
+				reason = "forward interrupted before Telegram request"
+			}
+			job.attempts = max(0, job.attempts-1)
+			job.retryAt = 0
+		}
+		if hasUncertainDestination(job.destinations) {
+			status = "uncertain"
+			reason = "Telegram response was lost; delivery may have succeeded"
+		}
+		if status == "failed" && job.queueID > 0 && job.attempts < 3 && !job.noAutoRetry && ctx.Err() == nil {
+			status = "pending"
+			reason = ""
+			if job.retryAt <= time.Now().UnixMilli() {
+				job.retryAt = time.Now().Add(time.Second * time.Duration(1<<max(0, job.attempts-1))).UnixMilli()
+			}
+		}
 		a.finishForwardQueue(context.WithoutCancel(ctx), job, status, reason)
 		a.finishProcessingForward(context.WithoutCancel(ctx), job.historyID, status)
-		if status == "failed" && job.queueID > 0 && job.attempts < 3 && ctx.Err() == nil {
-			delay := time.Second * time.Duration(1<<max(0, job.attempts-1))
-			time.AfterFunc(delay, func() {
-				res, err := a.db.Writer.ExecContext(context.WithoutCancel(ctx), `UPDATE tgdl_forward_queue SET status='pending',reason='',updated_at=? WHERE id=? AND status='failed' AND attempts=?`, time.Now().UnixMilli(), job.queueID, job.attempts)
-				if err == nil {
-					if n, _ := res.RowsAffected(); n > 0 {
-						select {
-						case a.forwards <- struct{}{}:
-						default:
-						}
-						a.notifyForwardQueue()
-					}
-				}
-			})
-		}
 	}()
 	if job.historyID != 0 {
 		_, _ = a.db.Writer.ExecContext(context.WithoutCancel(ctx), `UPDATE tgdl_processing_attempts SET forward_status='processing',local_delete_status=CASE WHEN local_delete_status='pending' THEN 'pending' ELSE 'not_requested' END WHERE id=?`, job.historyID)
@@ -919,7 +1279,7 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 	// gates them; explicit manual forwards use stage "available".
 	if job.stage != "available" {
 		_, _, enabled := forwardSettings(globalConfig, job.groupID)
-		if !enabled {
+		if !enabled && job.stage != "scan_direct" {
 			status = "not_applicable"
 			return
 		}
@@ -947,7 +1307,7 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 	}
 	needsUpload := false
 	needsSourceDownload := false
-	directCaptionEnabled := groupSettings["directForward"] == true && groupSettings["deleteAfterForward"] == true
+	directCaptionEnabled := job.settings["scanRoute"] == "direct" || job.settings["scanRoute"] == "both" || groupSettings["directForward"] == true && groupSettings["deleteAfterForward"] == true
 	for i, route := range routes {
 		settings := inheritCaptionSettings(route, groupSettings)
 		settings = effectiveForwardProtection(settings, groupSettings, route, job.topicID, globalConfig)
@@ -996,7 +1356,7 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 			settings = job.destinations[i].Settings
 		}
 		deleteAfter := job.recordID != 0 && groupSettings["deleteAfterForward"] == true && i == len(routes)-1
-		if job.destinations[i].Status == "forwarded" {
+		if job.destinations[i].Status == "forwarded" || job.destinations[i].Status == "uncertain" {
 			continue
 		}
 		job.destinations[i].Status = "processing"
@@ -1012,8 +1372,10 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 		}
 		a.persistForwardProgress(ctx, job)
 		if !a.forwardToRoute(ctx, &job, accountID, settings, deleteAfter) {
-			job.destinations[i].Status = "failed"
-			job.destinations[i].Reason = "delivery failed"
+			if job.destinations[i].Status != "uncertain" && !job.waitForEngine && !job.retryBeforeSend {
+				job.destinations[i].Status = "failed"
+				job.destinations[i].Reason = "delivery failed"
+			}
 			return
 		}
 		job.destinations[i].Status, job.destinations[i].Reason = "forwarded", ""
@@ -1021,6 +1383,23 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 	}
 	job.stage = "complete"
 	status = "forwarded"
+}
+
+func ambiguousDeliveryError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
+}
+
+func hasUncertainDestination(destinations []forwardDestination) bool {
+	for _, destination := range destinations {
+		if destination.Status == "uncertain" {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) downloadForForward(ctx context.Context, job *forwardJob) error {
@@ -1149,12 +1528,13 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		}
 		destWasBlocked = blocked
 	}
-	directCaption := job.stage == "caption_edit_failed" || job.path == "" && job.settings["directForward"] == true && job.settings["deleteAfterForward"] == true && customCaption(settings) && settings["protect"] != true
+	directCaption := customCaption(settings) && (job.settings["scanRoute"] == "direct" || job.settings["scanRoute"] == "both" || job.stage == "caption_edit_failed" || job.path == "" && job.settings["directForward"] == true && job.settings["deleteAfterForward"] == true && settings["protect"] != true)
 	if (job.path == "" || job.stage == "native_forward" || job.stage == "caption_edit_failed") && (!customCaption(settings) || directCaption) && settings["protect"] != true && job.messageID > 0 {
 		sender, ok := a.forwarder.(nativeForwardSender)
 		var directErr error
 		var destinationMessageID int
 		var sentID int
+		requestIssued := false
 		request := telegram.ForwardMessageRequest{Source: job.groupID, Destination: destination, MessageID: job.messageID, TopicID: int(number(settings["destinationTopicId"], 0)), Protect: false}
 		if !ok {
 			directErr = errors.New("native Telegram forwarding is unavailable")
@@ -1164,23 +1544,46 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 				if captionErr != nil {
 					return false
 				}
-				request.EditCaption, request.Caption, request.Entities = true, caption, entities
-				request.ResultMessageID = &destinationMessageID
-				if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); i >= 0 {
-					request.EditMessageID = job.destinations[i].DestinationMessageID
+				if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); caption == "" && (i < 0 || job.destinations[i].DestinationMessageID == 0) {
+					request.DropMediaCaptions = true
+				} else {
+					request.EditCaption, request.Caption, request.Entities = true, caption, entities
+					request.ResultMessageID = &destinationMessageID
+					if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); i >= 0 {
+						request.EditMessageID = job.destinations[i].DestinationMessageID
+					}
 				}
 			}
-			_, sentID, directErr = sender.ForwardMessage(ctx, accountID, request)
+			if waitErr := a.waitForwardAccount(ctx, accountID); waitErr != nil {
+				directErr = waitErr
+			} else {
+				requestIssued = true
+				_, sentID, directErr = sender.ForwardMessage(ctx, accountID, request)
+			}
 			if destinationMessageID == 0 {
 				destinationMessageID = sentID
 			}
 		}
 		if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); i >= 0 {
-			job.destinations[i].DestinationMessageID = destinationMessageID
+			if destinationMessageID > 0 {
+				job.destinations[i].DestinationMessageID = destinationMessageID
+			}
 			if directErr != nil {
 				job.destinations[i].DirectFailed = true
 				job.destinations[i].Reason = "direct forward failed"
-				job.destinations[i].Method = "upload"
+				if requestIssued && ambiguousDeliveryError(directErr) {
+					job.destinations[i].Status = "uncertain"
+					job.destinations[i].Reason = "Telegram response was lost; delivery may have succeeded"
+				} else if !requestIssued && errors.Is(directErr, context.Canceled) {
+					job.destinations[i].Status = "pending"
+					job.destinations[i].Reason = "forward interrupted before Telegram request"
+					job.destinations[i].DirectFailed = false
+					job.retryBeforeSend = true
+					job.destinations[i].Method = "native_forward"
+				}
+				if job.destinations[i].Status != "pending" {
+					job.destinations[i].Method = "upload"
+				}
 			} else {
 				job.destinations[i].DirectFailed = false
 				job.destinations[i].Reason = ""
@@ -1191,6 +1594,33 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		}
 		if directErr == nil {
 			return true
+		}
+		if errors.Is(directErr, engine.ErrEngineNotRunning) {
+			if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); i >= 0 {
+				job.destinations[i].Status = "pending"
+				job.destinations[i].Reason = "Waiting for monitor to start"
+				job.destinations[i].DirectFailed = false
+				job.destinations[i].Method = "native_forward"
+				if directCaption {
+					job.destinations[i].Method = "native_forward_edit"
+				}
+				if job.destinations[i].DestinationMessageID > 0 && directCaption {
+					job.destinations[i].Method = "caption_edit"
+				}
+			}
+			job.waitForEngine = true
+			return false
+		}
+		if !requestIssued && errors.Is(directErr, context.Canceled) {
+			a.persistForwardProgress(context.WithoutCancel(ctx), *job)
+			return false
+		}
+		if _, _, permanent := classifyAccessError(directErr); permanent {
+			job.noAutoRetry = true
+		}
+		if wait, flood := tgerr.AsFloodWait(directErr); flood {
+			a.blockForwardAccount(ctx, accountID, wait+time.Second)
+			job.retryAt = time.Now().Add(wait + time.Second).UnixMilli()
 		}
 		a.persistForwardProgress(ctx, *job)
 		// The source may disallow native forwarding while still allowing the
@@ -1222,7 +1652,21 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 	var used string
 	var sent int
 	floodWaitAttempts := a.forwarderConfig(ctx).floodWaitAttempts
+	var floodWait time.Duration
+	var floodLimited bool
 	for attempt := 1; ; attempt++ {
+		if err = a.waitForwardAccount(ctx, accountID); err != nil {
+			if errors.Is(err, context.Canceled) {
+				if i := forwardDestinationIndex(job.destinations, destination, req.TopicID); i >= 0 {
+					job.destinations[i].Status = "pending"
+					job.destinations[i].Reason = "forward interrupted before Telegram request"
+					job.destinations[i].Method = "upload"
+				}
+				job.retryBeforeSend = true
+				a.persistForwardProgress(context.WithoutCancel(ctx), *job)
+			}
+			return false
+		}
 		if _, err = file.Seek(0, io.SeekStart); err != nil {
 			break
 		}
@@ -1231,22 +1675,43 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		used, sent, err = a.forwarder.SendFile(attemptCtx, accountID, req)
 		cancel()
 		wait, flood := tgerr.AsFloodWait(err)
+		floodWait, floodLimited = wait, flood
+		if flood && wait > 0 {
+			a.blockForwardAccount(ctx, accountID, wait+time.Second)
+			job.retryAt = time.Now().Add(wait + time.Second).UnixMilli()
+		}
 		if !flood || attempt >= floodWaitAttempts {
 			break
 		}
-		// Telegram asked this account to wait; the flood guard keeps every
-		// other request off it meanwhile. Try again once the wait is over.
-		timer := time.NewTimer(wait + time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return false
-		case <-timer.C:
-		}
+		// The account gate is shared by every forward worker and persists across restarts.
 	}
 	if err != nil {
+		if errors.Is(err, engine.ErrEngineNotRunning) {
+			if i := forwardDestinationIndex(job.destinations, destination, req.TopicID); i >= 0 {
+				job.destinations[i].Status = "pending"
+				job.destinations[i].Reason = "Waiting for monitor to start"
+				job.destinations[i].DirectFailed = false
+			}
+			job.waitForEngine = true
+			return false
+		}
+		if floodLimited && floodWait > 0 {
+			job.retryAt = time.Now().Add(floodWait + time.Second).UnixMilli()
+		}
 		if ctx.Err() != nil {
 			return false
+		}
+		if ambiguousDeliveryError(err) {
+			if i := forwardDestinationIndex(job.destinations, destination, req.TopicID); i >= 0 {
+				job.destinations[i].Status = "uncertain"
+				job.destinations[i].Reason = "Telegram response was lost; delivery may have succeeded"
+				job.destinations[i].Method = "upload"
+			}
+			a.persistForwardProgress(ctx, *job)
+			return false
+		}
+		if _, _, permanent := classifyAccessError(err); permanent {
+			job.noAutoRetry = true
 		}
 		a.forwardFailed(*job, destination, err)
 		if key != "" {
@@ -1408,14 +1873,29 @@ func (a *App) forwardFailed(job forwardJob, destination string, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	a.failProcessingForward(context.WithoutCancel(ctx), job.historyID, err)
-	a.finishForwardQueue(context.WithoutCancel(ctx), job, "failed", err.Error())
+	safeErr := errors.New(a.safeForwardReason(err.Error()))
+	a.failProcessingForward(context.WithoutCancel(ctx), job.historyID, safeErr)
+	a.finishForwardQueue(context.WithoutCancel(ctx), job, "failed", safeErr.Error())
 	if a.output != nil {
-		fmt.Fprintf(a.output, "AutoForward: %s message %d failed: %v\n", job.groupName, job.messageID, err)
+		fmt.Fprintf(a.output, "AutoForward: %s message %d failed: %s\n", job.groupName, job.messageID, safeErr)
 	}
 	a.hub.Broadcast(ws.Event{Type: "forward_error", Payload: map[string]any{
-		"groupId": job.groupID, "groupName": job.groupName, "messageId": job.messageID, "destination": destination, "error": err.Error(),
+		"groupId": job.groupID, "groupName": job.groupName, "messageId": job.messageID, "destination": destination, "error": safeErr.Error(),
 	}})
+}
+
+func (a *App) safeForwardReason(reason string) string {
+	for _, root := range []string{a.downloadsDir, a.dataDir} {
+		if root != "" {
+			reason = strings.ReplaceAll(reason, root, "[local data]")
+		}
+	}
+	reason = forwardLocalPathPattern.ReplaceAllString(reason, "[local path]")
+	reason = forwardSecretPattern.ReplaceAllString(reason, "$1=[redacted]")
+	if len(reason) > 512 {
+		reason = reason[:512]
+	}
+	return reason
 }
 
 // Bound one upload like a download attempt: 2 minutes plus 1 s per 16 KiB.
@@ -1625,6 +2105,13 @@ func (a *App) forwardCandidate(ctx context.Context, groupID string, messageID in
 	a.forwardActivityMu.Unlock()
 	if !enabled {
 		return false, nil, "", nil
+	}
+	var directQueued bool
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgdl_forward_queue WHERE group_id=? AND message_id=? AND (stage='scan_direct' OR (json_valid(forward_config_json) AND json_extract(forward_config_json,'$.settings.scanRoute') IN ('direct','both'))))`, groupID, messageID).Scan(&directQueued); err != nil {
+		return false, nil, "", err
+	}
+	if directQueued {
+		return false, settings, accountID, nil
 	}
 	var exists bool
 	err = a.db.Reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM downloads WHERE group_id=? AND message_id=?)`, groupID, messageID).Scan(&exists)

@@ -894,7 +894,7 @@ const ADVANCED_DEFAULTS = {
         scalerIntervalSec: 5,
         idleSleepMs: 200,
     },
-    forwarder: { concurrency: 1, queueSize: 256, intervalSec: 0, floodWaitAttempts: 3 },
+    forwarder: { concurrency: 1, queueSize: 256, intervalSec: 1, floodWaitAttempts: 3 },
     history: {
         backpressureCap: 500,
         backpressureMaxWaitMs: 15 * 60 * 1000,

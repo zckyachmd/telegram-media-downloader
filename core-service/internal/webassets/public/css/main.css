@@ -8932,6 +8932,14 @@ html.theme-light .cr-chips .account-chip {
     min-height: 36px;
     white-space: nowrap;
 }
+.queue-bucket-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+#queue-empty-show-all.hidden {
+    display: none;
+}
 /* Inside the ⋮ menu the actions become a labelled list. */
 .queue-more-menu {
     min-width: 240px;
@@ -8954,11 +8962,44 @@ html.theme-light .cr-chips .account-chip {
     border-radius: 6px;
     background: transparent;
 }
+#queue-actions-menu-slot .queue-global-actions button.hidden,
+#queue-bucket-actions-menu-slot button.hidden {
+    display: none;
+}
 #queue-actions-menu-slot .queue-global-actions button i {
     font-size: 18px;
 }
 #queue-actions-menu-slot .queue-global-actions button:hover {
     background: rgba(255, 255, 255, 0.06);
+}
+#queue-bucket-actions-menu-slot .queue-bucket-actions,
+#queue-bucket-actions-menu-slot [data-queue-bucket] {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+}
+#queue-bucket-actions-menu-slot .queue-bucket-actions {
+    padding-bottom: 4px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--tg-border);
+}
+#queue-bucket-actions-menu-slot button {
+    min-height: 44px;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 0 10px;
+    font-size: 14px;
+    border-radius: 6px;
+    background: transparent;
+}
+#queue-bucket-actions-menu-slot button:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+#queue-bucket-actions-menu-slot #queue-forward-worker-state {
+    padding: 4px 10px;
+}
+html.theme-light #queue-bucket-actions-menu-slot button:hover {
+    background: rgba(0, 0, 0, 0.04);
 }
 html.theme-light #queue-actions-menu-slot .queue-global-actions button:hover {
     background: rgba(0, 0, 0, 0.04);

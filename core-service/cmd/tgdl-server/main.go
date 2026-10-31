@@ -65,7 +65,11 @@ func run(args []string, stdout, stderr io.Writer) int {
 	devMode := os.Getenv("TGDL_DEV_MODE") == "1"
 	var static fs.FS
 	if devMode {
-		static = os.DirFS("internal/webassets/public")
+		staticDir := os.Getenv("TGDL_DEV_ASSETS_DIR")
+		if staticDir == "" {
+			staticDir = "internal/webassets/public"
+		}
+		static = os.DirFS(staticDir)
 	} else {
 		static, err = fs.Sub(webassets.FS, "public")
 		if err != nil {
@@ -95,7 +99,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if mcpIssuer == "" {
 		mcpIssuer = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort))
 	}
-	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, Restart: stop, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: devMode, MCPIssuer: mcpIssuer})
+	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, Restart: stop, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: devMode, MCPIssuer: mcpIssuer, RequireMonitorForwards: true})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1

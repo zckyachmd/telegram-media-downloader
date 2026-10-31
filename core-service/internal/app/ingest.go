@@ -108,9 +108,13 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 				result := <-directResult
 				job := result.job
 				if result.err != nil {
-					a.updateForwardReservation(context.WithoutCancel(ctx), job, "failed", result.err.Error())
+					status := "failed"
+					if hasUncertainDestination(job.destinations) {
+						status = "uncertain"
+					}
+					a.updateForwardReservation(context.WithoutCancel(ctx), job, status, "")
 					a.failProcessingForward(context.WithoutCancel(ctx), attemptID, result.err)
-					a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "failed")
+					a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, status)
 				} else {
 					job.stage = "complete"
 					a.updateForwardReservation(context.WithoutCancel(ctx), job, "forwarded", "")
@@ -154,6 +158,12 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 				result := <-directResult
 				job.stage, job.destinations = result.job.stage, result.job.destinations
 				if result.err != nil {
+					if hasUncertainDestination(job.destinations) {
+						a.updateForwardReservation(context.WithoutCancel(ctx), job, "uncertain", "")
+						a.failProcessingForward(context.WithoutCancel(ctx), attemptID, result.err)
+						a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "uncertain")
+						return
+					}
 					if errors.Is(result.err, telegram.ErrForwardCaptionUnresolved) {
 						a.updateForwardReservation(context.WithoutCancel(ctx), job, "failed", result.err.Error())
 						a.failProcessingForward(context.WithoutCancel(ctx), attemptID, result.err)

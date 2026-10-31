@@ -17,6 +17,7 @@ import (
 
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 )
 
 // StorageChannelTitle is the channel 2.x created (or reused) when an
@@ -48,6 +49,7 @@ type ForwardMessageRequest struct {
 	Source, Destination string
 	MessageID, TopicID  int
 	Protect             bool
+	DropMediaCaptions   bool
 	EditCaption         bool
 	EditMessageID       int
 	ResultMessageID     *int `json:"-"`
@@ -107,7 +109,7 @@ func (s *fileSender) forward(ctx context.Context, req ForwardMessageRequest) (in
 		return 0, err
 	}
 	id := int64(binary.LittleEndian.Uint64(random[:]))
-	updates, err := s.api.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{FromPeer: source, ID: []int{req.MessageID}, RandomID: []int64{id}, ToPeer: destination, TopMsgID: req.TopicID, Noforwards: req.Protect})
+	updates, err := s.api.MessagesForwardMessages(ctx, &tg.MessagesForwardMessagesRequest{FromPeer: source, ID: []int{req.MessageID}, RandomID: []int64{id}, ToPeer: destination, TopMsgID: req.TopicID, DropAuthor: isStorageDestination(req.Destination), DropMediaCaptions: req.DropMediaCaptions, Noforwards: req.Protect})
 	if err != nil {
 		return 0, err
 	}
@@ -141,7 +143,7 @@ func (s *fileSender) editForwardedCaption(ctx context.Context, destination tg.In
 		}
 		return editErr
 	}
-	if _, err := editor.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{Peer: destination, ID: messageID, Message: req.Caption, Entities: req.Entities}); err == nil {
+	if _, err := editor.MessagesEditMessage(ctx, &tg.MessagesEditMessageRequest{Peer: destination, ID: messageID, Message: req.Caption, Entities: req.Entities}); err == nil || tgerr.Is(err, "MESSAGE_NOT_MODIFIED") {
 		return nil
 	} else if cleanupErr := s.deleteForwarded(ctx, destination, messageID); cleanupErr != nil {
 		return fmt.Errorf("%w: edit: %v; cleanup: %v", ErrForwardCaptionUnresolved, err, cleanupErr)
@@ -184,11 +186,12 @@ func (s *fileSender) deleteForwarded(ctx context.Context, peer tg.InputPeerClass
 // fileSender keeps the destinations it resolved for one account, so a busy
 // rule does not repeat username lookups or dialog scans for every file.
 type fileSender struct {
-	api     forwardAPI
-	resolve func(context.Context, string) (Dialog, error)
-	scan    func(context.Context, bool) ([]Dialog, error)
-	mu      sync.Mutex
-	peers   map[string]tg.InputPeerClass
+	api       forwardAPI
+	resolve   func(context.Context, string) (Dialog, error)
+	scan      func(context.Context, bool) ([]Dialog, error)
+	mu        sync.Mutex
+	storageMu sync.Mutex
+	peers     map[string]tg.InputPeerClass
 }
 
 // SendFile uploads a downloaded file to the destination and returns the new
@@ -287,6 +290,15 @@ func (s *fileSender) destination(ctx context.Context, raw string) (tg.InputPeerC
 	return peer, nil
 }
 
+func isStorageDestination(raw string) bool {
+	switch strings.TrimSpace(raw) {
+	case "", "storage":
+		return true
+	default:
+		return false
+	}
+}
+
 // numericPeer follows gramJS: the cached entity first, then the account's
 // dialogs, then a hand-made peer that Telegram refuses with a clear error
 // (CHANNEL_INVALID) when the account has never seen the channel.
@@ -337,15 +349,30 @@ func (s *fileSender) phonePeer(ctx context.Context, phone string) (tg.InputPeerC
 	return dialogs[0].peer, nil
 }
 
-// storageChannel finds the storage channel among the first 100 dialogs, as
-// 2.x did, and creates it when it is missing.
+// storageChannel reuses the account's storage channel or creates it once.
 func (s *fileSender) storageChannel(ctx context.Context) (tg.InputPeerClass, error) {
-	dialogs, err := fetchDialogs(ctx, s.api, 100, 0)
-	if err != nil {
-		return nil, err
+	s.storageMu.Lock()
+	defer s.storageMu.Unlock()
+
+	s.mu.Lock()
+	peer := s.peers["storage"]
+	s.mu.Unlock()
+	if peer != nil {
+		return peer, nil
 	}
-	for _, dialog := range dialogs {
-		if dialog.Name == StorageChannelTitle && dialog.peer != nil {
+	for _, folder := range []int{0, 1} {
+		dialogs, err := fetchDialogs(ctx, s.api, -1, folder)
+		if err != nil {
+			return nil, err
+		}
+		for _, dialog := range dialogs {
+			if dialog.Name != StorageChannelTitle {
+				continue
+			}
+			if dialog.peer == nil {
+				return nil, errors.New("existing storage channel has no reusable Telegram peer")
+			}
+			s.cacheStoragePeer(dialog.peer)
 			return dialog.peer, nil
 		}
 	}
@@ -366,10 +393,21 @@ func (s *fileSender) storageChannel(ctx context.Context) (tg.InputPeerClass, err
 	}
 	for _, chat := range chats {
 		if channel, ok := chat.(*tg.Channel); ok {
-			return &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}, nil
+			peer := &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}
+			s.cacheStoragePeer(peer)
+			return peer, nil
 		}
 	}
 	return nil, errors.New("Telegram did not return the created storage channel")
+}
+
+func (s *fileSender) cacheStoragePeer(peer tg.InputPeerClass) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.peers == nil {
+		s.peers = map[string]tg.InputPeerClass{}
+	}
+	s.peers["storage"] = peer
 }
 
 func usernameOf(dest string) string {

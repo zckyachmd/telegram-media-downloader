@@ -158,7 +158,7 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, err
 	}
 	hasForwardConfig := false
-	hasForwardStage, hasForwardDestinations, hasForwardAttempts := false, false, false
+	hasForwardStage, hasForwardDestinations, hasForwardAttempts, hasForwardRetryAt, hasForwardSourceKind := false, false, false, false, false
 	for columns.Next() {
 		var cid, notNull, primaryKey int
 		var name, kind string
@@ -178,6 +178,12 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 		}
 		if name == "attempts" {
 			hasForwardAttempts = true
+		}
+		if name == "retry_at" {
+			hasForwardRetryAt = true
+		}
+		if name == "source_kind" {
+			hasForwardSourceKind = true
 		}
 	}
 	if err := columns.Close(); err != nil {
@@ -203,11 +209,44 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 			return 0, err
 		}
 	}
+	if !hasForwardRetryAt {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return 0, err
+		}
+	}
+	if !hasForwardSourceKind {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''`); err != nil {
+			return 0, fmt.Errorf("add forward queue source kind: %w", err)
+		}
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE tgdl_forward_queue SET source_kind='scan_direct'
+		WHERE id IN (
+			SELECT MIN(id) FROM tgdl_forward_queue
+			WHERE history_id=0 AND record_id=0 AND file_path=''
+			GROUP BY group_id,message_id
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM tgdl_forward_queue existing
+			WHERE existing.group_id=tgdl_forward_queue.group_id AND existing.message_id=tgdl_forward_queue.message_id AND existing.source_kind='scan_direct'
+		)`); err != nil {
+		return 0, fmt.Errorf("backfill direct scan deduplication keys: %w", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS tgdl_forward_queue_state (id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL DEFAULT 0);
+		INSERT INTO tgdl_forward_queue_state(id,paused) VALUES(1,0) ON CONFLICT(id) DO NOTHING;
+		CREATE TABLE IF NOT EXISTS tgdl_forward_queue_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, job_id INTEGER NOT NULL, action TEXT NOT NULL, created_at INTEGER NOT NULL, detail TEXT NOT NULL DEFAULT '');
+		CREATE TABLE IF NOT EXISTS tgdl_forward_account_limits (account_id TEXT PRIMARY KEY NOT NULL, blocked_until INTEGER NOT NULL DEFAULT 0);
+		DROP INDEX IF EXISTS idx_tgdl_forward_scan_once;
+		CREATE UNIQUE INDEX idx_tgdl_forward_scan_once ON tgdl_forward_queue(group_id,message_id) WHERE source_kind='scan_direct';`); err != nil {
+		return 0, fmt.Errorf("create independent forward queue state: %w", err)
+	}
 	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_forward_queue_status ON tgdl_forward_queue(status,id)`); err != nil {
 		return 0, err
 	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_tgdl_forward_queue_due ON tgdl_forward_queue(status,retry_at,id)`); err != nil {
+		return 0, err
+	}
 	now := time.Now().UnixMilli()
-	if _, err := db.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status='interrupted',reason='server restarted before forwarding completed',updated_at=?,completed_at=? WHERE status='processing'`, now, now); err != nil {
+	if _, err := db.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status='uncertain',reason='server restarted while Telegram delivery outcome was unknown',updated_at=?,completed_at=? WHERE status='processing'`, now, now); err != nil {
 		return 0, err
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tgdl_processing_attempts SET outcome='interrupted',reason='server restarted before processing completed',completed_at=? WHERE outcome='processing'`, now); err != nil {
@@ -216,8 +255,13 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 	if _, err := db.ExecContext(ctx, `UPDATE tgdl_processing_attempts SET outcome='interrupted',reason='processing cancelled (context canceled)',completed_at=? WHERE outcome='failed' AND reason IN ('download Telegram media: context canceled','download Telegram media: write output: context canceled')`, now); err != nil {
 		return 0, err
 	}
+	if _, err := db.ExecContext(ctx, `UPDATE tgdl_processing_attempts SET forward_status='uncertain',forward_reason='server restarted while Telegram delivery outcome was unknown',completed_at=?
+		WHERE EXISTS (SELECT 1 FROM tgdl_forward_queue q WHERE q.history_id=tgdl_processing_attempts.id AND q.status='uncertain')`, now); err != nil {
+		return 0, err
+	}
 	if _, err := db.ExecContext(ctx, `UPDATE tgdl_processing_attempts SET forward_status='interrupted',forward_reason='server restarted before forwarding completed',completed_at=?
-		WHERE forward_status='processing' OR (forward_status='pending' AND NOT EXISTS (SELECT 1 FROM tgdl_forward_queue q WHERE q.history_id=tgdl_processing_attempts.id AND q.status IN ('pending','processing')))`, now); err != nil {
+		WHERE (forward_status='processing' AND NOT EXISTS (SELECT 1 FROM tgdl_forward_queue q WHERE q.history_id=tgdl_processing_attempts.id AND q.status='uncertain'))
+		OR (forward_status='pending' AND NOT EXISTS (SELECT 1 FROM tgdl_forward_queue q WHERE q.history_id=tgdl_processing_attempts.id AND q.status IN ('pending','processing','uncertain')))`, now); err != nil {
 		return 0, err
 	}
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS tgdl_derived_cleanup (area TEXT NOT NULL,path TEXT NOT NULL,PRIMARY KEY(area,path))`); err != nil {

@@ -16,7 +16,7 @@ run: build
 
 dev:
 	@echo "Open the dashboard at http://127.0.0.1:3002"
-	TGDL_DATA_DIR="$${TGDL_DATA_DIR:-$(CURDIR)/data/dev}" PORT=3003 TGDL_BIND_HOST=127.0.0.1 TRUST_PROXY=0 TGDL_DEV_MODE=1 $(AIR) -c .air.toml
+	TGDL_DATA_DIR="$${TGDL_DATA_DIR:-$(CURDIR)/data/dev}" TGDL_DEV_ASSETS_DIR=core-service/internal/webassets/public PORT=3003 TGDL_BIND_HOST=127.0.0.1 TRUST_PROXY=0 TGDL_DEV_MODE=1 $(AIR) -c .air.toml
 
 release:
 	@mkdir -p "$(DIST_DIR)/$(RELEASE_NAME)"
