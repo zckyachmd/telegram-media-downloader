@@ -9,7 +9,7 @@ import sqlite3
 root = Path(__file__).resolve().parents[2]
 migration = (root / "core-service/internal/store/migrate.go").read_text()
 source = (root / "core-service/internal/app/forward.go").read_text()
-match = re.search(r"CREATE INDEX IF NOT EXISTS idx_tgdl_forward_queue_page[\\s\\S]*?uncertain'\\)", migration)
+match = re.search(r"CREATE INDEX IF NOT EXISTS idx_tgdl_forward_queue_page[\s\S]*?uncertain'\)", migration)
 assert match, "pagination index is missing from migration"
 assert "ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1 WHEN 'uncertain' THEN 2 ELSE 3 END,id DESC LIMIT ? OFFSET ?" in source
 conn = sqlite3.connect(":memory:")
