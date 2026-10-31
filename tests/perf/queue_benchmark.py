@@ -53,6 +53,7 @@ def main():
     try:
         db.execute("PRAGMA query_only=ON")
         print("Rows:", db.execute("SELECT COUNT(*) FROM tgdl_forward_queue").fetchone()[0])
+        print("SQLite version:", db.execute("SELECT sqlite_version()").fetchone()[0])
         indexes = db.execute("PRAGMA index_list('tgdl_forward_queue')").fetchall()
         print("Queue indexes:", ", ".join(row[1] for row in indexes))
         if not any(row[1] == "idx_tgdl_forward_queue_page" for row in indexes):
