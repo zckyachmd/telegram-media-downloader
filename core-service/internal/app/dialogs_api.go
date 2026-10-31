@@ -56,8 +56,17 @@ func (a *App) handleDialogTopics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"topics": topics})
 }
 
+// setDialogsServerTiming reports the complete dialog acquisition duration,
+// including engine startup and persisted access aggregation. It is not
+// a pure Telegram RPC latency measurement.
+func setDialogsServerTiming(w http.ResponseWriter, elapsed time.Duration) {
+	w.Header().Set("Server-Timing", fmt.Sprintf("dialogs;dur=%.1f", float64(elapsed)/float64(time.Millisecond)))
+}
+
 func (a *App) handleDialogs(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	dialogs, err := a.browseDialogs(r.Context())
+	setDialogsServerTiming(w, time.Since(start))
 	if err != nil {
 		if a.output != nil {
 			fmt.Fprintf(a.output, "Telegram dialogs unavailable: %v\n", err)
