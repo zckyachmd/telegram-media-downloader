@@ -89,6 +89,19 @@ import {
     getPinnedMode,
 } from './gallery-toolbar.js';
 
+// Share concurrent dialog discovery across bootstrap, chat list, and manual
+// forwarding. This coalesces overlapping Telegram-backed HTTP requests; it
+// does not cache indefinitely or replace explicit refreshes after completion.
+let dialogsInFlight = null;
+function fetchDialogsShared() {
+    if (!dialogsInFlight) {
+        dialogsInFlight = api.get('/api/dialogs').finally(() => {
+            dialogsInFlight = null;
+        });
+    }
+    return dialogsInFlight;
+}
+
 // ============ Lazy page modules ============
 //
 // settings.js (~3.3k lines + its own imports) and backfill.js only matter
@@ -672,7 +685,7 @@ async function init() {
     // or rendering the already-cached groups. Keep boot interactive while it
     // loads; chat-specific views can request dialogs when actually needed.
     if (isAdmin) {
-        void api.get('/api/dialogs')
+        void fetchDialogsShared()
             .then((res) => {
                 state.allDialogs = res?.dialogs || res || [];
                 state.dialogsAccounts = Array.isArray(res?.accounts) ? res.accounts : [];
@@ -3348,7 +3361,7 @@ async function setupMediaSearch() {
             </div>`;
         const sheet = openSheet({ title: i18nT('group.fwd.title','Forward selected media'), content: form, size: 'sm' });
         if (!state.allDialogs) {
-            api.get('/api/dialogs').then((response) => {
+            fetchDialogsShared().then((response) => {
                 state.allDialogs = response.dialogs || [];
                 const select = form.querySelector('[name="destination"]');
                 const chosen = select.value;
@@ -3616,7 +3629,7 @@ async function renderGroupsConfig({ restoreScroll = false } = {}) {
     }
 
     try {
-        const [res] = await Promise.all([api.get('/api/dialogs'), loadAddSheetModule()]);
+        const [res] = await Promise.all([fetchDialogsShared(), loadAddSheetModule()]);
         const dialogs = res.dialogs || res || [];
         // Stash the account directory for chip rendering in renderDialogsList.
         // Only meaningful when 2+ accounts are linked — otherwise chips would
