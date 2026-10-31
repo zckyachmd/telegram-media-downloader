@@ -66,6 +66,7 @@ with sync_playwright() as p:
       }));
       window.routesHarness.setup();
       document.addEventListener('click', onClick);
+      document.addEventListener('input', onInput);
       const select = document.querySelector('[data-route-destination]');
       select.innerHTML = forwardGroupOptions('-10042');
       cacheSearchOptions(select);
