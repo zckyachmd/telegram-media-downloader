@@ -89,6 +89,10 @@ with sync_playwright() as p:
     assert page.locator('[data-select-option][data-select-option="-1004999"]').count() == 1
     # Selecting a result beyond the first page must propagate through the
     # delegated click handler, keep the chosen value, and survive filtering.
+    # The menu starts closed in the test fixture: open it through the real
+    # trigger before using a user-visible Playwright click.
+    page.locator('[data-route-destination]').locator('xpath=..').locator('[data-select-trigger]').click()
+    page.locator('[data-option-search]').last.fill('Target 4999')
     page.locator('[data-select-option][data-select-option="-1004999"]').click()
     assert page.locator('[data-route-destination]').input_value() == '-1004999'
     page.evaluate('''() => {
