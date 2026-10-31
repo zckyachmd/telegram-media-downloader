@@ -899,11 +899,43 @@ func (a *App) forwardQueueSnapshot(ctx context.Context, offset int) (map[string]
 	var stats struct {
 		Total, Pending, Active, Forwarded, Failed, Interrupted, Uncertain, NotApplicable int64
 	}
-	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(status='pending'),0),COALESCE(SUM(status='processing'),0),
-		COALESCE(SUM(status='forwarded'),0),COALESCE(SUM(status='failed'),0),COALESCE(SUM(status='interrupted'),0),COALESCE(SUM(status='uncertain'),0),COALESCE(SUM(status='not_applicable'),0)
-		FROM tgdl_forward_queue`).Scan(&stats.Total, &stats.Pending, &stats.Active, &stats.Forwarded, &stats.Failed, &stats.Interrupted, &stats.Uncertain, &stats.NotApplicable); err != nil {
+	// Count statuses from the existing (status,id) covering index.
+	// This remains O(queue rows) but avoids reading the full queue records
+	// and evaluating eight boolean SUM expressions for each row.
+	counts, err := a.db.Reader.QueryContext(ctx, `SELECT status, COUNT(*) FROM tgdl_forward_queue GROUP BY status`)
+	if err != nil {
 		return nil, err
 	}
+	for counts.Next() {
+		var status string
+		var count int64
+		if err := counts.Scan(&status, &count); err != nil {
+			counts.Close()
+			return nil, err
+		}
+		stats.Total += count
+		switch status {
+		case "pending":
+			stats.Pending = count
+		case "processing":
+			stats.Active = count
+		case "forwarded":
+			stats.Forwarded = count
+		case "failed":
+			stats.Failed = count
+		case "interrupted":
+			stats.Interrupted = count
+		case "uncertain":
+			stats.Uncertain = count
+		case "not_applicable":
+			stats.NotApplicable = count
+		}
+	}
+	if err := counts.Err(); err != nil {
+		counts.Close()
+		return nil, err
+	}
+	counts.Close()
 	actionable := stats.Pending + stats.Active + stats.Failed + stats.Interrupted + stats.Uncertain
 	if actionable == 0 {
 		offset = 0
