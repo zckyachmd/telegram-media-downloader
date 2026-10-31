@@ -495,7 +495,21 @@ function patchProgress(payload) {
 }
 
 // ============ Bootstrap ============
-async function loadSnapshot() {
+// A badge preload and a route entry can happen in the same event loop.
+// Share the pending request rather than resetting state with two responses.
+let _snapshotInFlight = null;
+function loadSnapshot() {
+    if (_snapshotInFlight) return _snapshotInFlight;
+    const request = fetchAndApplySnapshot();
+    _snapshotInFlight = request;
+    const clear = () => {
+        if (_snapshotInFlight === request) _snapshotInFlight = null;
+    };
+    void request.then(clear, clear);
+    return request;
+}
+
+async function fetchAndApplySnapshot() {
     try {
         const snap = await api.get('/api/queue/snapshot');
         // Wipe local state and rebuild from the authoritative server snapshot.
