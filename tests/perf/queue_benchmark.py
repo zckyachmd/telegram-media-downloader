@@ -15,7 +15,9 @@ OLD = """SELECT COUNT(*),COALESCE(SUM(status='pending'),0),
  COALESCE(SUM(status='uncertain'),0),COALESCE(SUM(status='not_applicable'),0)
  FROM tgdl_forward_queue"""
 NEW = "SELECT status, COUNT(*) FROM tgdl_forward_queue GROUP BY status"
-PAGE = """SELECT id FROM tgdl_forward_queue
+# Keep the projection aligned with forwardQueueSnapshot in app/forward.go.
+# SELECT id alone can pick a different covering index and misrepresent the API.
+PAGE = """SELECT id,group_id,group_name,message_id,file_name,topic_id,status,reason,created_at,forward_config_json,stage,destinations_json,attempts,retry_at FROM tgdl_forward_queue
  WHERE status IN ('pending','processing','failed','interrupted','uncertain')
  ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1
  WHEN 'uncertain' THEN 2 ELSE 3 END,id DESC LIMIT 50 OFFSET ?"""
@@ -51,6 +53,10 @@ def main():
     try:
         db.execute("PRAGMA query_only=ON")
         print("Rows:", db.execute("SELECT COUNT(*) FROM tgdl_forward_queue").fetchone()[0])
+        indexes = db.execute("PRAGMA index_list('tgdl_forward_queue')").fetchall()
+        print("Queue indexes:", ", ".join(row[1] for row in indexes))
+        if not any(row[1] == "idx_tgdl_forward_queue_page" for row in indexes):
+            print("NOTE: pagination expression index is absent from this snapshot; check database migration version.")
         old_result, old_ms = sample(db, OLD, runs=args.runs)
         new_result, new_ms = sample(db, NEW, runs=args.runs)
         counts = dict(new_result)
