@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,6 +15,99 @@ import (
 )
 
 type connectingAccount struct{ entered chan struct{} }
+
+type messageDownloadAccount struct {
+	connectingAccount
+	refreshed  *telegram.RefreshedMessage
+	attachment telegram.Attachment
+}
+
+func (a *messageDownloadAccount) RefreshMessage(context.Context, *tg.Message) (*telegram.RefreshedMessage, error) {
+	return a.refreshed, nil
+}
+func (a *messageDownloadAccount) DownloadMedia(_ context.Context, attachment telegram.Attachment, w io.Writer) error {
+	a.attachment = attachment
+	_, err := w.Write([]byte("media"))
+	return err
+}
+
+func TestDownloadMessageRefreshesAndChecksMediaIdentity(t *testing.T) {
+	ctx := context.Background()
+	message := &tg.Message{ID: 1, PeerID: &tg.PeerChannel{ChannelID: 42}, Media: &tg.MessageMediaDocument{Document: &tg.Document{ID: 10, Size: 5, DCID: 2, Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeFilename{FileName: "a.bin"}}}}}
+	attachment, err := telegram.MessageAttachment(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := &messageDownloadAccount{refreshed: &telegram.RefreshedMessage{Message: message}}
+	run := &running{ctx: ctx, accounts: map[string]Account{"one": account}, ids: []string{"one"}}
+	controller := &Controller{state: "running", run: run}
+	var output bytes.Buffer
+	if err := controller.DownloadMessage(ctx, "one", message, attachment.Identity, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "media" || account.attachment.Identity.Key() != attachment.Identity.Key() {
+		t.Fatalf("download output=%q attachment=%#v", output.String(), account.attachment)
+	}
+	attachment.Identity.ID = "11"
+	if err := controller.DownloadMessage(ctx, "one", message, attachment.Identity, &output); err == nil {
+		t.Fatal("changed source identity was accepted")
+	}
+}
+
+func TestLiveRouteRunsBeforeDownloadQueueAndCanSkipIt(t *testing.T) {
+	work := testStore(t)
+	target := Target{ID: "-10042", Name: "Source"}
+	run := &running{wake: make(chan struct{}, 1), active: map[int64]context.CancelFunc{}}
+	run.observing.Store(true)
+	c := &Controller{
+		work: work,
+		filter: func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
+			return target, true, nil
+		},
+	}
+	routed := false
+	c.SetLiveRoute(func(_ context.Context, accountID string, got Target, message *tg.Message) (bool, error) {
+		routed = accountID == "acct1" && got == target && message.ID == 715
+		return true, nil
+	})
+	update := &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateNewChannelMessage{Message: testMessage(715, 0, 993), Pts: 2}}}
+	if err := c.accept(context.Background(), run, "acct1", update); err != nil {
+		t.Fatal(err)
+	}
+	var queued int
+	if err := work.writer.QueryRow(`SELECT COUNT(*) FROM tgdl_work`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if !routed || queued != 0 {
+		t.Fatalf("route called=%v download work=%d", routed, queued)
+	}
+}
+
+func TestLiveRouteFailurePreventsDownloadEnqueue(t *testing.T) {
+	work := testStore(t)
+	run := &running{wake: make(chan struct{}, 1), active: map[int64]context.CancelFunc{}}
+	run.observing.Store(true)
+	c := &Controller{
+		work: work,
+		filter: func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
+			return Target{ID: "-10042", Name: "Source"}, true, nil
+		},
+	}
+	c.SetLiveRoute(func(context.Context, string, Target, *tg.Message) (bool, error) {
+		return false, errors.New("route persistence failed")
+	})
+	update := &tg.Updates{Updates: []tg.UpdateClass{&tg.UpdateNewChannelMessage{Message: testMessage(716, 0, 994), Pts: 3}}}
+	if err := c.accept(context.Background(), run, "acct1", update); err == nil {
+		t.Fatal("expected route failure")
+	}
+	var queued int
+	if err := work.writer.QueryRow(`SELECT COUNT(*) FROM tgdl_work`).Scan(&queued); err != nil {
+		t.Fatal(err)
+	}
+	if queued != 0 {
+		t.Fatalf("download work queued after route failure: %d", queued)
+	}
+}
 
 func (a *connectingAccount) Run(ctx context.Context, ready func()) error {
 	close(a.entered)

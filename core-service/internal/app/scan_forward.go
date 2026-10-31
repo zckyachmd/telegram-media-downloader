@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 )
 
@@ -31,6 +33,21 @@ func scanRouteSettings(cfg map[string]any, groupID string) (map[string]any, stri
 		return settings, toString(group["forwardAccount"]), mode
 	}
 	return nil, "", "download"
+}
+
+func (a *App) routeLiveScan(ctx context.Context, accountID string, target engine.Target, message *tg.Message) (bool, error) {
+	cfg, err := a.config.Load(ctx)
+	if err != nil {
+		return false, err
+	}
+	settings, forwardAccount, mode := scanRouteSettings(cfg, target.ID)
+	if mode != "direct" && mode != "both" {
+		return false, nil
+	}
+	if err := a.queueDirectScan(ctx, target.ID, target.Name, forwardAccount, settings, cfg, message); err != nil {
+		return false, err
+	}
+	return mode == "direct", nil
 }
 
 func insertDirectScanTx(ctx context.Context, tx *sql.Tx, groupID, groupName, accountID string, settings, globalConfig map[string]any, queueLimit int, message *tg.Message) (bool, error) {
@@ -59,11 +76,15 @@ func insertDirectScanTx(ctx context.Context, tx *sql.Tx, groupID, groupName, acc
 	if err != nil {
 		return false, err
 	}
+	var encodedMessage bin.Buffer
+	if err := message.Encode(&encodedMessage); err != nil {
+		return false, err
+	}
 	now := time.Now().UnixMilli()
-	result, err := tx.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,file_name,topic_id,caption,facts_json,forward_config_json,destinations_json,status,reason,stage,source_kind,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,CASE WHEN (SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing'))>=? THEN 'failed' ELSE 'pending' END,
+	result, err := tx.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,file_name,topic_id,caption,facts_json,source_message,forward_config_json,destinations_json,status,reason,stage,source_kind,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,CASE WHEN (SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing'))>=? THEN 'failed' ELSE 'pending' END,
 		CASE WHEN (SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing'))>=? THEN 'forward queue capacity reached; scan job retained for retry' ELSE '' END,'scan_direct','scan_direct',?,?)
-		ON CONFLICT(group_id,message_id) WHERE source_kind='scan_direct' DO NOTHING`, groupID, groupName, message.ID, attachment.Name, topicID, message.Message, string(facts), string(config), string(destinationState), queueLimit, queueLimit, now, now)
+		ON CONFLICT(group_id,message_id) WHERE source_kind='scan_direct' DO NOTHING`, groupID, groupName, message.ID, attachment.Name, topicID, message.Message, string(facts), encodedMessage.Raw(), string(config), string(destinationState), queueLimit, queueLimit, now, now)
 	if err != nil {
 		return false, err
 	}

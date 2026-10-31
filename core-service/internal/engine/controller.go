@@ -76,6 +76,7 @@ type Controller struct {
 	dataDir        string
 	factory        Factory
 	filter         Filter
+	route          LiveRoute
 	sink           any
 	observer       UpdateObserver
 	notify         func(string, error)
@@ -89,6 +90,17 @@ type Controller struct {
 	bandwidth      bandwidthLimiter
 	received       atomic.Int64 // media bytes received by all workers
 	scaling        Scaling
+}
+
+// LiveRoute runs after filtering and before download enqueue. It must persist
+// idempotently before returning; an error prevents Telegram update ack.
+// Return skipDownload for forward-only routes.
+type LiveRoute func(context.Context, string, Target, *tg.Message) (skipDownload bool, err error)
+
+func (c *Controller) SetLiveRoute(route LiveRoute) {
+	c.mu.Lock()
+	c.route = route
+	c.mu.Unlock()
 }
 
 // Scaling adapts how many workers download at once, as 2.x did: a long
@@ -922,6 +934,20 @@ func (c *Controller) accept(ctx context.Context, run *running, accountID string,
 		}
 		if !allowed {
 			continue
+		}
+		if !telegram.IsHistoryRecovery(ctx) {
+			c.mu.Lock()
+			route := c.route
+			c.mu.Unlock()
+			if route != nil {
+				skipDownload, err := route(ctx, accountID, target, message)
+				if err != nil {
+					return err
+				}
+				if skipDownload {
+					continue
+				}
+			}
 		}
 		id, changed, err := c.work.Enqueue(ctx, accountID, target, message, pts)
 		if err != nil {

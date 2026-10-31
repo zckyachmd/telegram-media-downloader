@@ -575,8 +575,8 @@ function renderForwardQueue(data) {
         if (sentinel) sentinel.classList.add('hidden');
         view.rendered = 0;
     };
-    const allItems = data.items || [];
-    const items = allItems.filter((item) => item.status !== 'not_applicable');
+    const items = (data.items || []).filter((item) => item.status !== 'not_applicable');
+    const recentItems = data.recent || [];
     const actionableCount = Number(data.pending || 0) + Number(data.active || 0) + Number(data.failed || 0) + Number(data.interrupted || 0) + Number(data.uncertain || 0);
     const pageCount = Math.max(1, Math.ceil(actionableCount / FORWARD_PAGE_SIZE));
     forwardQueuePage = Math.min(Math.max(1, Number(data.page) || forwardQueuePage), pageCount);
@@ -591,7 +591,7 @@ function renderForwardQueue(data) {
         </div>`);
         return;
     }
-    if (!items.length) {
+    if (!items.length && !recentItems.length) {
         if (rows.innerHTML !== '') rows.innerHTML = '';
         if (empty) empty.classList.remove('hidden');
         if (sentinel) sentinel.classList.add('hidden');
@@ -609,7 +609,7 @@ function renderForwardQueue(data) {
         uncertain: 'queue.forward.status.uncertain',
         not_applicable: 'queue.forward.status.not_applicable',
     };
-    const slice = items.slice(0, FORWARD_PAGE_SIZE);
+    const slice = [...items.slice(0, FORWARD_PAGE_SIZE), ...recentItems];
     const html = slice.map((item) => {
         const group = item.groupName || item.groupId || '?';
         const destinations = (item.destinations || []).join(', ') || '—';
@@ -628,7 +628,7 @@ function renderForwardQueue(data) {
         const progress = item.status === 'forwarded' ? 100 : destinationCount ? Math.round((sentCount / destinationCount) * 100) : 0;
         const targetProgress = destinationCount ? `${sentCount}/${destinationCount}` : '—';
         const destinationsDetail = destinationStates.length
-            ? destinationStates.map((d) => `${d.settings?.destinationGroupId || d.settings?.destination || i18nT('queue.forward.destination', 'Destination')} · ${d.method || '—'} · ${d.status || 'pending'}${d.settings?.protect ? ' · protected' : ''}${d.directFailed ? ` · ${i18nT('queue.forward.direct_failed', 'Direct failed')}` : ''}`).join('; ')
+            ? destinationStates.map((d) => `${d.settings?.destinationGroupId || d.settings?.destination || i18nT('queue.forward.destination', 'Destination')} · ${d.method || '—'} · ${d.status || 'pending'}${d.settings?.protect ? ' · protected' : ''}${d.directFailed ? ` · ${i18nT('queue.forward.direct_failed', 'Direct failed')}` : ''}${d.fallbackReason ? ` · ${d.fallbackReason}` : ''}${d.reason ? ` · ${d.reason}` : ''}`).join('; ')
             : '';
         const retry = ['failed', 'interrupted'].includes(item.status)
             ? `<button type="button" class="tg-btn-secondary tg-btn-sm min-h-11 md:min-h-8" data-forward-retry="${escapeHtml(item.id)}">${escapeHtml(i18nT('queue.forward.retry', 'Retry'))}</button>`

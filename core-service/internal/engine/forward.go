@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"errors"
+	"io"
 
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
+	"github.com/gotd/td/tg"
 )
 
 type fileSender interface {
@@ -12,6 +14,46 @@ type fileSender interface {
 }
 type messageForwarder interface {
 	ForwardMessage(context.Context, telegram.ForwardMessageRequest) (int, error)
+}
+type mediaMessageAccount interface {
+	telegram.MediaDownloader
+	RefreshMessage(context.Context, *tg.Message) (*telegram.RefreshedMessage, error)
+}
+
+func (c *Controller) DownloadMessage(ctx context.Context, accountID string, message *tg.Message, identity telegram.MediaIdentity, w io.Writer) error {
+	run, err := c.queueRun()
+	if err != nil {
+		return err
+	}
+	if run.accounts[accountID] == nil {
+		if len(run.ids) == 0 {
+			return ErrEngineNotRunning
+		}
+		accountID = run.ids[0]
+	}
+	account, ok := run.accounts[accountID].(mediaMessageAccount)
+	if !ok {
+		return errors.New("account cannot download source media")
+	}
+	run.jobUsers.Add(1)
+	defer run.jobUsers.Add(-1)
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if run.ctx != nil {
+		defer context.AfterFunc(run.ctx, cancel)()
+	}
+	fresh, err := account.RefreshMessage(ctx, message)
+	if err != nil {
+		return err
+	}
+	attachment, err := telegram.MessageAttachment(fresh.Message)
+	if err != nil {
+		return err
+	}
+	if attachment.Identity.Key() != identity.Key() {
+		return errors.New("source media changed before fallback download")
+	}
+	return account.DownloadMedia(ctx, attachment, w)
 }
 
 // Observing reports whether the monitor is running live (not only connected

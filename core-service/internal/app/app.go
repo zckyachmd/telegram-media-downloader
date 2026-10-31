@@ -31,8 +31,8 @@ import (
 	"github.com/botnick/telegram-media-downloader/core-service/internal/store"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
-	"golang.org/x/sync/singleflight"
 	"github.com/gorilla/websocket"
+	"golang.org/x/sync/singleflight"
 )
 
 type Config struct {
@@ -68,7 +68,7 @@ type App struct {
 	accounts          *accounts.Repository
 	accountWizard     *accounts.Wizard
 	monitorOp         sync.Mutex
-	dialogVersion     uint64 // monitorOp guards confirmed remote removals vs older listings
+	dialogVersion     uint64             // monitorOp guards confirmed remote removals vs older listings
 	dialogListing     singleflight.Group // shares concurrent Telegram listings; never caches settled results
 	historyMu         sync.Mutex
 	historyJobs       map[string]*historyJob
@@ -285,6 +285,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		fmt.Fprintf(cfg.Output, "Media cleanup remains pending: %v\n", err)
 	}
 	a.monitor = engine.New(db.Writer, db.Reader, cfg.DataDir, cfg.AccountFactory, a.monitorFilter, engine.ForwardSinkAdapter{ForwardSink: engine.ForwardSink(a.ingestWorkWithForward)}, a.monitorEvent)
+	a.monitor.SetLiveRoute(a.routeLiveScan)
 	a.monitor.SetUpdateObserver(a.observeRescueUpdate)
 	a.forwarder, a.forwards = a.monitor, make(chan struct{}, 1)
 	mux := http.NewServeMux()

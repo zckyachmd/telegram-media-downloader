@@ -21,6 +21,7 @@ import (
 	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/mcpcontrol"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -167,8 +168,13 @@ func TestDirectScanQueueIsDurableIdempotentAndDoesNotCreateDownloadWork(t *testi
 	}
 	var jobs, work int
 	var filePath, stage string
-	if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*),MAX(file_path),MAX(stage) FROM tgdl_forward_queue WHERE group_id=? AND message_id=?`, "-1000000000123", 712).Scan(&jobs, &filePath, &stage); err != nil {
+	var sourceMessage []byte
+	if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*),MAX(file_path),MAX(stage),MAX(source_message) FROM tgdl_forward_queue WHERE group_id=? AND message_id=?`, "-1000000000123", 712).Scan(&jobs, &filePath, &stage, &sourceMessage); err != nil {
 		t.Fatal(err)
+	}
+	var decoded tg.Message
+	if err := decoded.Decode(&bin.Buffer{Buf: sourceMessage}); err != nil || decoded.ID != message.ID {
+		t.Fatalf("saved fallback source message id=%d err=%v", decoded.ID, err)
 	}
 	if err = a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_work WHERE group_id=? AND message_id=?`, "-1000000000123", 712).Scan(&work); err != nil {
 		t.Fatal(err)
@@ -228,6 +234,30 @@ func TestLiveDirectScanRouteBypassesLocalMediaDownload(t *testing.T) {
 	}
 	if downloads.Load() != 0 || queued != 1 || downloadWork != 0 {
 		t.Fatalf("downloads=%d forward jobs=%d download jobs=%d", downloads.Load(), queued, downloadWork)
+	}
+}
+
+func TestLiveRoutePersistsDirectWorkBeforeSkippingDownloadQueue(t *testing.T) {
+	for _, tc := range []struct {
+		mode         string
+		skipDownload bool
+		forwardJobs  int
+	}{{"direct", true, 1}, {"both", false, 1}, {"download", false, 0}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": tc.mode})
+			target := engine.Target{ID: "-1000000000123", Name: "Source"}
+			skipDownload, err := a.routeLiveScan(context.Background(), "acct1", target, docMessage(716, 123, 994, ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var queued int
+			if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM tgdl_forward_queue WHERE group_id=? AND message_id=? AND source_kind='scan_direct'`, target.ID, 716).Scan(&queued); err != nil {
+				t.Fatal(err)
+			}
+			if skipDownload != tc.skipDownload || queued != tc.forwardJobs {
+				t.Fatalf("skip download=%v forward jobs=%d", skipDownload, queued)
+			}
+		})
 	}
 }
 
@@ -1065,8 +1095,10 @@ func TestForwardQueueSnapshotIncludesAllRetryableJobs(t *testing.T) {
 	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive"})
 	statuses := []string{"pending", "processing", "forwarded", "failed", "interrupted", "not_applicable"}
 	for i, status := range statuses {
-		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,status,created_at,updated_at)
-			VALUES('-1000000000123','Source',?,?,1,1)`, i+1, status); err != nil {
+		destinations := "[]"
+		if status == "forwarded" { destinations = `[{"settings":{"destination":"@Archive"},"status":"forwarded","method":"upload","fallbackReason":"Direct forward rejected; uploaded instead"}]` }
+		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,status,destinations_json,created_at,updated_at)
+			VALUES('-1000000000123','Source',?,?,?,1,1)`, i+1, status, destinations); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1108,6 +1140,10 @@ func TestForwardQueueSnapshotIncludesAllRetryableJobs(t *testing.T) {
 	}
 	if lastPage["page"] != 2 || len(lastPage["items"].([]map[string]any)) != wantSecondPage {
 		t.Fatalf("out-of-range page should clamp to last page: %#v", lastPage)
+	}
+	recent := lastPage["recent"].([]map[string]any)
+	if len(recent) != 1 || recent[0]["status"] != "forwarded" || recent[0]["destinationStates"].([]forwardDestination)[0].FallbackReason != "Direct forward rejected; uploaded instead" {
+		t.Fatalf("recent forward history=%#v", recent)
 	}
 	token, err := a.sessions.Create(ctx, "admin")
 	if err != nil {

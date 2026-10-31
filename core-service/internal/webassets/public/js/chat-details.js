@@ -421,7 +421,7 @@ function switchRow({ id, label, sub, on, disabled = false, extraClass = '' }) {
         </button>`;
 }
 
-function forwardGroupOptions(selected) {
+function forwardGroupDestinations() {
     const byID = new Map();
     for (const chat of [...(state.allDialogs || []), ...(state.groups || [])]) {
         if (chat?.id == null) continue;
@@ -430,7 +430,11 @@ function forwardGroupOptions(selected) {
         byID.set(id, { id, name: getGroupName(id, { fallback: chat.name || chat.title }) });
     }
     if (cur?.id) byID.set(String(cur.id), { id: String(cur.id), name: cur.name });
-    const groups = [...byID.values()].sort((a, b) => a.name.localeCompare(b.name));
+    return [...byID.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function forwardGroupOptions(selected, groups = forwardGroupDestinations()) {
+    const byID = new Map(groups.map((group) => [group.id, group]));
     const special = [
         { id: 'storage', name: i18nT('group.fwd.storage', 'Telegram Downloader Storage') },
         { id: 'me', name: i18nT('group.fwd.saved_messages', 'Saved Messages') },
@@ -445,7 +449,7 @@ function forwardGroupOptions(selected) {
         .join('')}`;
 }
 
-function forwardRouteHtml(route = {}, index = 0) {
+function forwardRouteHtml(route = {}, index = 0, groups) {
     const routeLabel = i18nTf('group.fwd.route_number', { number: index + 1 }, `Route ${index + 1}`);
     const suffix = ++forwardRouteSequence;
     const sourceID = `fwd-source-topic-${suffix}`;
@@ -464,7 +468,7 @@ function forwardRouteHtml(route = {}, index = 0) {
         </select></div></div>
         <div class="cd-route-field"><label class="cd-label" for="${destinationID}-trigger">${escapeHtml(i18nT('group.fwd.destination_group', 'Destination group'))}</label>
         <div class="cd-search-select" data-search-select><button id="${destinationID}-trigger" type="button" class="tg-input cd-input cd-select-trigger" data-select-trigger aria-haspopup="listbox" aria-expanded="false"><span data-select-value></span><i class="ri-arrow-down-s-line" aria-hidden="true"></i></button><div class="cd-select-menu hidden" data-select-menu><input id="${destinationID}-search" class="tg-input cd-input cd-option-search" type="search" data-option-search data-option-search-empty="${escapeHtml(i18nT('group.fwd.no_search_results', 'No matching options.'))}" placeholder="${escapeHtml(i18nT('group.fwd.search_groups', 'Search groups…'))}" aria-label="${escapeHtml(i18nT('group.fwd.search_groups', 'Search groups…'))}" autocomplete="off"><div class="cd-select-options" data-select-options role="listbox"></div></div>
-        <select id="${destinationID}" class="cd-native-select" data-route-destination data-selected="${escapeHtml(String(destinationGroupId))}" tabindex="-1" aria-hidden="true">${forwardGroupOptions(destinationGroupId)}</select></div></div>
+        <select id="${destinationID}" class="cd-native-select" data-route-destination data-selected="${escapeHtml(String(destinationGroupId))}" tabindex="-1" aria-hidden="true">${forwardGroupOptions(destinationGroupId, groups)}</select></div></div>
         <div class="cd-route-field hidden" data-route-destination-topic-wrap><label class="cd-label" for="${destinationTopicID}-trigger">${escapeHtml(i18nT('group.fwd.destination_topic', 'Destination topic'))}</label>
         <div class="cd-search-select" data-search-select><button id="${destinationTopicID}-trigger" type="button" class="tg-input cd-input cd-select-trigger" data-select-trigger aria-haspopup="listbox" aria-expanded="false"><span data-select-value></span><i class="ri-arrow-down-s-line" aria-hidden="true"></i></button><div class="cd-select-menu hidden" data-select-menu><input id="${destinationTopicID}-search" class="tg-input cd-input cd-option-search" type="search" data-option-search data-option-search-empty="${escapeHtml(i18nT('group.fwd.no_search_results', 'No matching options.'))}" placeholder="${escapeHtml(i18nT('group.fwd.search_topics', 'Search topics…'))}" aria-label="${escapeHtml(i18nT('group.fwd.search_destination_topics', 'Search destination topics'))}" autocomplete="off"><div class="cd-select-options" data-select-options role="listbox"></div></div>
         <select id="${destinationTopicID}" class="cd-native-select" data-route-destination-topic data-selected="${escapeHtml(String(route.destinationTopicId || 0))}" tabindex="-1" aria-hidden="true" disabled>
@@ -597,8 +601,10 @@ function cacheSearchOptions(select) {
     select._searchOptions = [...select.options].map((option) => ({
         value: option.value,
         label: option.textContent,
+        searchLabel: option.textContent.toLocaleLowerCase(),
         disabled: option.disabled,
     }));
+    select._searchOptionsByValue = new Map(select._searchOptions.map((option) => [option.value, option]));
     filterSearchOptions(select);
 }
 
@@ -609,6 +615,7 @@ function filterSearchOptions(select, query = null) {
     const options = select._searchOptions || [...select.options].map((option) => ({
         value: option.value,
         label: option.textContent,
+        searchLabel: option.textContent.toLocaleLowerCase(),
         disabled: option.disabled,
     }));
     const value = input ? (query ?? input.value).trim().toLocaleLowerCase() : '';
@@ -621,7 +628,7 @@ function filterSearchOptions(select, query = null) {
     const matching = [];
     let matchCount = 0;
     for (const option of options) {
-        if (value && !option.label.toLocaleLowerCase().includes(value)) continue;
+        if (value && !option.searchLabel.includes(value)) continue;
         matchCount++;
         if (matching.length < MAX_VISIBLE_OPTIONS) matching.push(option);
     }
@@ -638,7 +645,7 @@ function filterSearchOptions(select, query = null) {
             list.appendChild(hint);
         }
     }
-    const selectedOption = options.find((option) => option.value === selected);
+    const selectedOption = select._searchOptionsByValue?.get(selected) || options.find((option) => option.value === selected);
     const trigger = widget?.querySelector('[data-select-trigger]');
     if (trigger) {
         trigger.querySelector('[data-select-value]').textContent = selectedOption?.label || '';
@@ -821,6 +828,7 @@ function render() {
     const blocked = blockedNow();
     const fwdBlocked = isBlockedAccess(g?.forwardAccess) && forwardingEnabled;
     const d = findDialog(cur.id);
+    const forwardDestinations = forwardGroupDestinations();
 
     el.classList.add('cd-page');
     el.innerHTML = `
@@ -976,6 +984,15 @@ function render() {
                         sub: i18nT('group.fwd.direct_help', 'When caption and protection settings allow, Telegram forwarding avoids a local download. If Telegram rejects it, the job downloads and uploads the media.'),
                         on: fwd.directForward === true,
                     }) : ''}
+                    <div class="cd-route-field">
+                        <label class="cd-label" for="fwd-scan-route">${escapeHtml(i18nT('group.fwd.scan_route', 'Route scanned messages'))}</label>
+                        <select id="fwd-scan-route" class="tg-input cd-input">
+                            <option value="download" ${fwd.scanRoute === 'direct' || fwd.scanRoute === 'both' ? '' : 'selected'}>${escapeHtml(i18nT('group.fwd.scan_route.download', 'Download only'))}</option>
+                            <option value="direct" ${fwd.scanRoute === 'direct' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.scan_route.direct', 'Direct forward only'))}</option>
+                            <option value="both" ${fwd.scanRoute === 'both' ? 'selected' : ''}>${escapeHtml(i18nT('group.fwd.scan_route.both', 'Download and direct forward'))}</option>
+                        </select>
+                        <p class="cd-help">${escapeHtml(i18nT('group.fwd.scan_route_help', 'Direct forwarding sends accepted Telegram messages without saving media locally.'))}</p>
+                    </div>
                     ${globalCaptionFields(fwd)}
                     <section class="cd-route-section" aria-labelledby="cd-routes-title">
                         <div class="cd-route-heading">
@@ -983,7 +1000,7 @@ function render() {
                             <p class="cd-help">${escapeHtml(i18nT('group.fwd.routes_help', 'Choose a destination for every route. Topic groups also let you route each topic.'))}</p></div>
                             <button type="button" class="tg-btn cd-route-add" data-cd-add-route><i class="ri-add-line" aria-hidden="true"></i><span>${escapeHtml(i18nT('group.fwd.add_route', 'Add route'))}</span></button>
                         </div>
-                        <div id="fwd-routes" class="cd-fields">${forwardRoutes.map((route, index) => forwardRouteHtml(route, index)).join('')}</div>
+                        <div id="fwd-routes" class="cd-fields">${forwardRoutes.map((route, index) => forwardRouteHtml(route, index, forwardDestinations)).join('')}</div>
                         <p class="cd-help ${forwardingConfigured ? 'hidden' : ''}" role="status" data-forward-route-required>${escapeHtml(i18nT('group.fwd.destination_required', 'Choose a destination before forwarding can start.'))}</p>
                     </section>
                 </div>
@@ -1864,6 +1881,8 @@ async function onChange(e) {
         } else queueSave({ autoForward: { routes } }, 0);
     } else if (id === 'fwd-destination') {
         queueSave({ autoForward: { destination: e.target.value.trim() } }, 0);
+    } else if (id === 'fwd-scan-route') {
+        queueSave({ autoForward: { scanRoute: e.target.value } }, 0);
     } else if (id === 'setting-rescue-hours') {
         queueSave(rescueHoursPatch(), 0);
     } else if (id === 'monitor-account') {

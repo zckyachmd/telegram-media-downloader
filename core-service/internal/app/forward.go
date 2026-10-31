@@ -20,9 +20,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/botnick/telegram-media-downloader/core-service/internal/download"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/engine"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
+	"github.com/gotd/td/bin"
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 )
@@ -68,6 +70,7 @@ type forwardJob struct {
 	waitForEngine      bool
 	retryBeforeSend    bool
 	directForward      func(context.Context, telegram.ForwardMessageRequest) error
+	sourceMessage      []byte
 }
 
 type forwardDestination struct {
@@ -75,6 +78,7 @@ type forwardDestination struct {
 	Status               string         `json:"status"`
 	Method               string         `json:"method"`
 	Reason               string         `json:"reason,omitempty"`
+	FallbackReason       string         `json:"fallbackReason,omitempty"`
 	DirectFailed         bool           `json:"directFailed,omitempty"`
 	DestinationMessageID int            `json:"destinationMessageId,omitempty"`
 }
@@ -464,8 +468,8 @@ func (a *App) claimForward(ctx context.Context) (*forwardJob, error) {
 	now := time.Now().UnixMilli()
 	err := a.db.Writer.QueryRowContext(ctx, `UPDATE tgdl_forward_queue SET status='processing',retry_at=0,updated_at=? WHERE id=(
 		SELECT id FROM tgdl_forward_queue WHERE status='pending' AND retry_at<=? AND COALESCE((SELECT paused FROM tgdl_forward_queue_state WHERE id=1),0)=0 ORDER BY id LIMIT 1
-	) RETURNING id,history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,destinations_json,attempts`, now, now).Scan(
-		&job.queueID, &job.historyID, &job.groupID, &job.groupName, &job.messageID, &job.fileName, &job.topicID, &job.text, &job.recordID, &job.path, &facts, &forwardConfig, &job.stage, &destinations, &job.attempts)
+	) RETURNING id,history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,destinations_json,attempts,source_message`, now, now).Scan(
+		&job.queueID, &job.historyID, &job.groupID, &job.groupName, &job.messageID, &job.fileName, &job.topicID, &job.text, &job.recordID, &job.path, &facts, &forwardConfig, &job.stage, &destinations, &job.attempts, &job.sourceMessage)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -986,6 +990,41 @@ func (a *App) forwardQueueSnapshot(ctx context.Context, offset int) (map[string]
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	recent := make([]map[string]any, 0, 10)
+	completed, err := a.db.Reader.QueryContext(ctx, `SELECT id,group_id,group_name,message_id,file_name,topic_id,reason,created_at,stage,destinations_json FROM tgdl_forward_queue WHERE status='forwarded' ORDER BY completed_at DESC,id DESC LIMIT 10`)
+	if err != nil {
+		return nil, err
+	}
+	for completed.Next() {
+		var id, messageID, createdAt int64
+		var groupID, groupName, fileName, reason, stage, destinationsJSON string
+		var topicID int
+		if err := completed.Scan(&id, &groupID, &groupName, &messageID, &fileName, &topicID, &reason, &createdAt, &stage, &destinationsJSON); err != nil {
+			completed.Close()
+			return nil, err
+		}
+		var destinationStates []forwardDestination
+		_ = json.Unmarshal([]byte(destinationsJSON), &destinationStates)
+		destinations := make([]string, 0, len(destinationStates))
+		for _, d := range destinationStates {
+			target := strings.TrimSpace(toString(d.Settings["destinationGroupId"]))
+			if target == "" {
+				target = strings.TrimSpace(toString(d.Settings["destination"]))
+			}
+			if target != "" {
+				destinations = append(destinations, target)
+			}
+		}
+		recent = append(recent, map[string]any{"id": id, "groupId": groupID, "groupName": groupName, "messageId": messageID, "fileName": fileName, "topicId": topicID, "status": "forwarded", "reason": a.safeForwardReason(reason), "stage": stage, "createdAt": createdAt, "destinations": destinations, "destinationStates": destinationStates})
+	}
+	if err := completed.Err(); err != nil {
+		completed.Close()
+		return nil, err
+	}
+	completed.Close()
 	var paused int
 	_ = a.db.Reader.QueryRowContext(ctx, `SELECT paused FROM tgdl_forward_queue_state WHERE id=1`).Scan(&paused)
 	config := a.forwarderConfig(ctx)
@@ -993,7 +1032,7 @@ func (a *App) forwardQueueSnapshot(ctx context.Context, offset int) (map[string]
 	if paused != 0 {
 		workerStatus = "paused"
 	}
-	return map[string]any{"total": stats.Total - stats.NotApplicable, "pending": stats.Pending, "active": stats.Active, "forwarded": stats.Forwarded, "failed": stats.Failed, "interrupted": stats.Interrupted, "uncertain": stats.Uncertain, "paused": paused != 0, "workerStatus": workerStatus, "concurrency": config.concurrency, "capacity": config.queueSize, "intervalSec": config.intervalSec, "notApplicable": stats.NotApplicable, "page": offset/forwardQueuePageSize + 1, "pageSize": forwardQueuePageSize, "hasMore": int64(offset+len(items)) < actionable, "items": items}, nil
+	return map[string]any{"total": stats.Total - stats.NotApplicable, "pending": stats.Pending, "active": stats.Active, "forwarded": stats.Forwarded, "failed": stats.Failed, "interrupted": stats.Interrupted, "uncertain": stats.Uncertain, "paused": paused != 0, "workerStatus": workerStatus, "concurrency": config.concurrency, "capacity": config.queueSize, "intervalSec": config.intervalSec, "notApplicable": stats.NotApplicable, "page": offset/forwardQueuePageSize + 1, "pageSize": forwardQueuePageSize, "hasMore": int64(offset+len(items)) < actionable, "items": items, "recent": recent}, nil
 }
 
 // forwardSettings returns the chat's autoForward rule and forward account, or
@@ -1368,8 +1407,12 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 		}
 	}
 	if needsSourceDownload {
-		a.forwardFailed(job, "", errors.New("this forwarding route requires a completed download"))
-		return
+		job.stage = "fallback_download"
+		if err := a.downloadForForward(ctx, &job); err != nil {
+			a.forwardFailed(job, "", err)
+			return
+		}
+		needsUpload, needsSourceDownload = true, false
 	}
 	if job.stage != "caption_edit_failed" {
 		if needsUpload {
@@ -1410,7 +1453,10 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 			}
 			return
 		}
-		job.destinations[i].Status, job.destinations[i].Reason = "forwarded", ""
+		job.destinations[i].Status = "forwarded"
+		if !job.destinations[i].DirectFailed {
+			job.destinations[i].Reason = ""
+		}
 		a.persistForwardProgress(ctx, job)
 	}
 	job.stage = "complete"
@@ -1435,10 +1481,60 @@ func hasUncertainDestination(destinations []forwardDestination) bool {
 }
 
 func (a *App) downloadForForward(ctx context.Context, job *forwardJob) error {
-	if job.messageID <= 0 || a.monitor == nil {
-		return errors.New("source message cannot be downloaded for protected forwarding")
+	if job.messageID <= 0 || a.monitor == nil || len(job.sourceMessage) == 0 {
+		return errors.New("fallback download unavailable: queued source message or live Telegram session is missing")
 	}
-	return errors.New("source media needs a live Telegram session for download")
+	var message tg.Message
+	buffer := bin.Buffer{Buf: job.sourceMessage}
+	if err := message.Decode(&buffer); err != nil {
+		return fmt.Errorf("fallback download unavailable: decode queued source message: %w", err)
+	}
+	attachment, err := telegram.MessageAttachment(&message)
+	if err != nil {
+		return fmt.Errorf("fallback download unavailable: %w", err)
+	}
+	job.stage = "fallback_download"
+	a.persistForwardProgress(ctx, *job)
+	item := download.Item{GroupID: job.groupID, GroupName: job.groupName, MessageID: int64(job.messageID), Name: attachment.Name, Type: attachment.Type, Identity: attachment.Identity, Facts: job.facts}
+	if item.Name == "" {
+		item.Name = job.fileName
+	}
+	record, err := a.library.Ingest(ctx, item, forwardMessageClient{controller: a.monitor, accountID: job.accountID, message: &message, identity: attachment.Identity})
+	if err != nil {
+		return fmt.Errorf("fallback download failed: %w", err)
+	}
+	job.recordID, job.path = record.ID, record.Path
+	job.fileName = path.Base(record.Path)
+	for i := range job.destinations {
+		job.destinations[i].Method = "upload"
+		if job.destinations[i].FallbackReason == "" {
+			switch {
+			case job.destinations[i].Settings["protect"] == true:
+				job.destinations[i].FallbackReason = "Destination requires protected media; downloaded and uploaded instead"
+			case customCaption(job.destinations[i].Settings):
+				job.destinations[i].FallbackReason = "Destination caption requires upload; downloaded and uploaded instead"
+			default:
+				job.destinations[i].FallbackReason = "Direct forwarding requires upload for this route; downloaded and uploaded instead"
+			}
+		}
+	}
+	job.stage = "fallback_upload"
+	a.persistForwardProgress(ctx, *job)
+	return nil
+}
+
+type forwardMessageClient struct {
+	controller *engine.Controller
+	accountID  string
+	message    *tg.Message
+	identity   telegram.MediaIdentity
+}
+
+func (c forwardMessageClient) Download(ctx context.Context, identity telegram.MediaIdentity, w io.Writer) error {
+	if identity.Key() != c.identity.Key() {
+		return errors.New("fallback media identity mismatch")
+	}
+	return c.controller.DownloadMessage(ctx, c.accountID, c.message, c.identity, w)
 }
 
 func customCaption(settings map[string]any) bool {
@@ -1658,8 +1754,26 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		// The source may disallow native forwarding while still allowing the
 		// application account to download and send an accessible media file.
 		if job.path == "" {
-			a.forwardFailed(*job, destination, directErr)
-			return false
+			if destinationMessageID > 0 || requestIssued && ambiguousDeliveryError(directErr) {
+				return false
+			}
+			i := forwardDestinationIndex(job.destinations, destination, request.TopicID)
+			fallbackReason := "Direct forward was rejected; downloaded and uploaded instead: " + a.safeForwardReason(directErr.Error())
+			if i >= 0 {
+				job.destinations[i].FallbackReason = fallbackReason
+			}
+			job.stage = "fallback_download"
+			a.persistForwardProgress(ctx, *job)
+			if err := a.downloadForForward(ctx, job); err != nil {
+				a.forwardFailed(*job, destination, fmt.Errorf("%s; fallback failed: %w", fallbackReason, err))
+				return false
+			}
+			if i >= 0 {
+				job.destinations[i].FallbackReason = fallbackReason
+			}
+			job.stage = "fallback_upload"
+			a.persistForwardProgress(ctx, *job)
+			return a.forwardToRoute(ctx, job, accountID, settings, deleteAfter)
 		}
 		job.stage = "fallback_upload"
 		a.persistForwardProgress(ctx, *job)

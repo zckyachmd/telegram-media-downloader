@@ -47,6 +47,22 @@ with sync_playwright() as p:
     for css in ('tailwind.css', 'main.css'):
         page.add_style_tag(content=(public / 'css' / css).read_text())
     page.add_script_tag(content=prelude + source + harness)
+    assert 'id="fwd-scan-route"' in source
+    assert all(f'value="{mode}"' in source for mode in ('download', 'direct', 'both'))
+    scan_route_patch = page.evaluate('''() => {
+      const originalTimeout = window.setTimeout;
+      window.setTimeout = () => 0;
+      cur = {id:'-10001', group:{autoForward:{enabled:true}}};
+      pending = null;
+      const select = document.createElement('select');
+      select.id = 'fwd-scan-route';
+      select.value = 'both';
+      void onChange({target:select});
+      const saved = pending;
+      window.setTimeout = originalTimeout;
+      return saved;
+    }''')
+    assert scan_route_patch['autoForward']['scanRoute'] == 'both', scan_route_patch
     for width in (390, 1280):
         page.set_viewport_size({'width': width, 'height': 900})
         page.evaluate('routesHarness.setup()')
@@ -102,6 +118,33 @@ with sync_playwright() as p:
     }''')
     assert page.locator('[data-route-destination]').input_value() == '-1004999'
     assert page.locator('[data-select-option]').count() == 0
+    # Rendering many routes against the issue-sized dialog list should reuse
+    # one sorted destination list while preserving each route's selection.
+    route_render = page.evaluate('''() => {
+      state.allDialogs = Array.from({length: 1000}, (_, i) => ({
+        id: String(-2000000 - i), name: 'Dialog ' + String(i).padStart(4, '0')
+      }));
+      const started = performance.now();
+      const destinations = forwardGroupDestinations();
+      const html = Array.from({length: 10}, (_, i) => forwardRouteHtml({
+        destinationGroupId: String(-2000000 - i)
+      }, i, destinations)).join('');
+      document.body.innerHTML = html;
+      const elapsedMs = performance.now() - started;
+      const selects = [...document.querySelectorAll('[data-route-destination]')];
+      return {
+        elapsedMs,
+        destinations: destinations.length,
+        routes: selects.length,
+        selected: selects.map((select) => select.value),
+        optionCounts: selects.map((select) => select.options.length),
+      };
+    }''')
+    assert route_render['routes'] == 10, route_render
+    assert route_render['destinations'] >= 1000, route_render
+    assert all(count >= 1000 for count in route_render['optionCounts']), route_render
+    assert route_render['selected'] == [str(-2000000 - i) for i in range(10)], route_render
+    print(f"PERF: 1000 dialogs × 10 routes rendered in {route_render['elapsedMs']:.1f}ms")
     # Duplicate route rules must disable conflicting options without
     # disabling the currently selected value of the same route.
     conflicts = page.evaluate('''() => {

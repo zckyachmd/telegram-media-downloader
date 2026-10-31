@@ -148,7 +148,7 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS tgdl_forward_queue (
 		id INTEGER PRIMARY KEY AUTOINCREMENT, history_id INTEGER NOT NULL DEFAULT 0, group_id TEXT NOT NULL, group_name TEXT NOT NULL DEFAULT '',
 		message_id INTEGER NOT NULL, file_name TEXT NOT NULL DEFAULT '', topic_id INTEGER NOT NULL DEFAULT 0, caption TEXT NOT NULL DEFAULT '',
-		record_id INTEGER NOT NULL DEFAULT 0, file_path TEXT NOT NULL DEFAULT '', facts_json TEXT NOT NULL DEFAULT '{}', forward_config_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'pending',
+		record_id INTEGER NOT NULL DEFAULT 0, file_path TEXT NOT NULL DEFAULT '', facts_json TEXT NOT NULL DEFAULT '{}', source_message BLOB NOT NULL DEFAULT X'', forward_config_json TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT 'pending',
 		reason TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, completed_at INTEGER NOT NULL DEFAULT 0
 	)`); err != nil {
 		return 0, fmt.Errorf("create forward queue: %w", err)
@@ -158,7 +158,7 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, err
 	}
 	hasForwardConfig := false
-	hasForwardStage, hasForwardDestinations, hasForwardAttempts, hasForwardRetryAt, hasForwardSourceKind := false, false, false, false, false
+	hasForwardStage, hasForwardDestinations, hasForwardAttempts, hasForwardRetryAt, hasForwardSourceKind, hasSourceMessage := false, false, false, false, false, false
 	for columns.Next() {
 		var cid, notNull, primaryKey int
 		var name, kind string
@@ -184,6 +184,9 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 		}
 		if name == "source_kind" {
 			hasForwardSourceKind = true
+		}
+		if name == "source_message" {
+			hasSourceMessage = true
 		}
 	}
 	if err := columns.Close(); err != nil {
@@ -217,6 +220,11 @@ func RunMigrations(ctx context.Context, db *sql.DB) (int, error) {
 	if !hasForwardSourceKind {
 		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN source_kind TEXT NOT NULL DEFAULT ''`); err != nil {
 			return 0, fmt.Errorf("add forward queue source kind: %w", err)
+		}
+	}
+	if !hasSourceMessage {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE tgdl_forward_queue ADD COLUMN source_message BLOB NOT NULL DEFAULT X''`); err != nil {
+			return 0, fmt.Errorf("add forward queue source message: %w", err)
 		}
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE tgdl_forward_queue SET source_kind='scan_direct'
