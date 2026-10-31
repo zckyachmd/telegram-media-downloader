@@ -7,8 +7,14 @@
 # machine to set the dashboard password, then add a Telegram account.
 services:
   telegram-downloader:
-    # Build from the local source tree.
-    build: .
+    # Limit compiler parallelism on memory-constrained ARM64 hosts.
+    # These apply to docker build only; deploy.resources below is runtime-only.
+    build:
+      context: .
+      args:
+        GO_BUILD_JOBS: ${TGDL_GO_BUILD_JOBS:-1}
+        GO_BUILD_MAXPROCS: ${TGDL_GO_BUILD_MAXPROCS:-2}
+        GO_BUILD_MEMLIMIT: ${TGDL_GO_BUILD_MEMLIMIT:-1536MiB}
     image: telegram-media-downloader:local
     container_name: telegram-downloader
     restart: unless-stopped
