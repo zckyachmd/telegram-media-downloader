@@ -102,5 +102,35 @@ with sync_playwright() as p:
     }''')
     assert page.locator('[data-route-destination]').input_value() == '-1004999'
     assert page.locator('[data-select-option]').count() == 0
+    # Duplicate route rules must disable conflicting options without
+    # disabling the currently selected value of the same route.
+    conflicts = page.evaluate('''() => {
+      const routes = document.createElement('div');
+      routes.id = 'fwd-routes';
+      routes.innerHTML = forwardRouteHtml({sourceTopicId:10,destinationGroupId:'-10042'},0)
+        + forwardRouteHtml({sourceTopicId:11,destinationGroupId:'-10042'},1);
+      document.body.replaceChildren(routes);
+      for (const [index, card] of [...routes.querySelectorAll('[data-forward-route]')].entries()) {
+        const source = card.querySelector('[data-route-source-topic]');
+        source.innerHTML = '<option value="0">All</option><option value="10">A</option><option value="11">B</option>';
+        source.value = String(index === 0 ? 10 : 11);
+        cacheSearchOptions(source);
+        const destination = card.querySelector('[data-route-destination]');
+        cacheSearchOptions(destination);
+      }
+      updateRouteWildcardState();
+      return [...routes.querySelectorAll('[data-forward-route]')].map((card) => {
+        const source = card.querySelector('[data-route-source-topic]');
+        return {
+          own: source.options[source.selectedIndex]?.disabled,
+          ten: [...source.options].find(o => o.value === '10').disabled,
+          eleven: [...source.options].find(o => o.value === '11').disabled,
+        };
+      });
+    }''')
+    assert conflicts == [
+        {'own': False, 'ten': False, 'eleven': True},
+        {'own': False, 'ten': True, 'eleven': False},
+    ], conflicts
     browser.close()
 print('PASS: route preservation and 5000-dialog bounded search regression')

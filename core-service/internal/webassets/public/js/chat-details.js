@@ -662,28 +662,44 @@ function refreshSourceTopicOptions() {
 
 function updateRouteWildcardState() {
     const routes = [...document.querySelectorAll('[data-forward-route]')];
-    for (const card of routes) {
+    // Index the selected pairs once instead of re-querying every other route
+    // for each option. This matters with many destinations/topics and routes.
+    const selections = routes.map((card) => ({
+        card,
+        source: card.querySelector('[data-route-source-topic]'),
+        destination: card.querySelector('[data-route-destination]'),
+    }));
+    const countsByDestination = new Map();
+    const countsBySource = new Map();
+    for (const entry of selections) {
+        entry.sourceID = Number(entry.source?.value) || 0;
+        entry.destinationID = entry.destination?.value || '';
+        const bySource = countsByDestination.get(entry.destinationID) || new Map();
+        bySource.set(entry.sourceID, (bySource.get(entry.sourceID) || 0) + 1);
+        countsByDestination.set(entry.destinationID, bySource);
+        const byDestination = countsBySource.get(entry.sourceID) || new Map();
+        byDestination.set(entry.destinationID, (byDestination.get(entry.destinationID) || 0) + 1);
+        countsBySource.set(entry.sourceID, byDestination);
+    }
+    for (const { card, source, destination, sourceID, destinationID } of selections) {
         const remove = card.querySelector('[data-route-remove]');
         if (remove) remove.disabled = routes.length <= 1;
-        const source = card.querySelector('[data-route-source-topic]');
-        const destination = card.querySelector('[data-route-destination]');
-        const sourceID = Number(source?.value) || 0;
-        const destinationID = destination?.value || '';
         const sourceAll = source && !source.closest('[data-route-source-topic-wrap]')?.classList.contains('hidden') && sourceID === 0;
         card.querySelector('[data-route-wildcard-note]')?.classList.toggle('hidden', !sourceAll);
 
+        const sourceCache = new Map((source?._searchOptions || []).map((item) => [item.value, item]));
+        const destinationCache = new Map((destination?._searchOptions || []).map((item) => [item.value, item]));
         for (const option of source?.options || []) {
-            option.disabled = Boolean(destinationID) && routes.some((other) => other !== card &&
-                other.querySelector('[data-route-destination]')?.value === destinationID &&
-                (Number(other.querySelector('[data-route-source-topic]')?.value) || 0) === Number(option.value));
-            const cached = source._searchOptions?.find((item) => item.value === option.value);
+            const value = Number(option.value);
+            const conflicts = countsByDestination.get(destinationID)?.get(value) || 0;
+            option.disabled = Boolean(destinationID) && conflicts > (sourceID === value ? 1 : 0);
+            const cached = sourceCache.get(option.value);
             if (cached) cached.disabled = option.disabled;
         }
         for (const option of destination?.options || []) {
-            option.disabled = Boolean(option.value) && routes.some((other) => other !== card &&
-                other.querySelector('[data-route-destination]')?.value === option.value &&
-                (Number(other.querySelector('[data-route-source-topic]')?.value) || 0) === sourceID);
-            const cached = destination._searchOptions?.find((item) => item.value === option.value);
+            const conflicts = countsBySource.get(sourceID)?.get(option.value) || 0;
+            option.disabled = Boolean(option.value) && conflicts > (destinationID === option.value ? 1 : 0);
+            const cached = destinationCache.get(option.value);
             if (cached) cached.disabled = option.disabled;
         }
     }
