@@ -292,7 +292,8 @@ func (s *DialogSession) ForumTopics(ctx context.Context, groupID string) ([]tele
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	for _, id := range s.run.ids {
+	var failures []error
+	for index, id := range s.run.ids {
 		account, ok := s.run.accounts[id].(interface {
 			ForumTopics(context.Context, string) ([]telegram.ForumTopic, error)
 		})
@@ -303,8 +304,14 @@ func (s *DialogSession) ForumTopics(ctx context.Context, groupID string) ([]tele
 		if err == nil {
 			return topics, nil
 		}
+		// Preserve each underlying cause for server diagnostics without
+		// including account identifiers or the requested chat ID.
+		failures = append(failures, fmt.Errorf("account position %d: %w", index+1, err))
 	}
-	return nil, errors.New("no connected account can read topics for this group")
+	if len(failures) == 0 {
+		return nil, errors.New("no connected account supports forum topics")
+	}
+	return nil, fmt.Errorf("no connected account can read topics for this group: %w", errors.Join(failures...))
 }
 
 func (s *DialogSession) ChatAccount(ctx context.Context, accountID string) (telegram.ChatOperator, error) {
