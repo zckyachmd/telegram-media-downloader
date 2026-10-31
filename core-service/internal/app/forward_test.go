@@ -1272,9 +1272,10 @@ func TestProtectedAutoForwardDownloadsAndUploadsProtectedCopy(t *testing.T) {
 	if call.body != "media" || !call.req.Protect {
 		t.Fatalf("protected upload=%+v", call)
 	}
-	if _, exists := rowPath(t, a, "-1000000000123", 20); exists {
-		t.Fatal("protected copy should delete local media after successful forward")
-	}
+	eventually(t, "protected copy deletion after forward", func() bool {
+		_, exists := rowPath(t, a, "-1000000000123", 20)
+		return !exists
+	})
 }
 
 func docMessage(id int, channel, doc int64, text string) *tg.Message {
