@@ -21,6 +21,8 @@ PAGE = """SELECT id,group_id,group_name,message_id,file_name,topic_id,status,rea
  WHERE status IN ('pending','processing','failed','interrupted','uncertain')
  ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'processing' THEN 1
  WHEN 'uncertain' THEN 2 ELSE 3 END,id DESC LIMIT 50 OFFSET ?"""
+# Diagnostic only: forcing the index may be slower on small datasets.
+PAGE_FORCED = PAGE.replace("FROM tgdl_forward_queue", "FROM tgdl_forward_queue INDEXED BY idx_tgdl_forward_queue_page")
 STATUSES = ("pending", "processing", "forwarded", "failed", "interrupted", "uncertain", "not_applicable")
 
 
@@ -64,11 +66,21 @@ def main():
         equivalent = old_result[0] == (sum(counts.values()), *(counts.get(s, 0) for s in STATUSES))
         if not equivalent:
             raise AssertionError("Old and new counts disagree")
-        _, page_ms = sample(db, PAGE, (args.offset,), args.runs)
-        for label, query, params in [("old_counts", OLD, ()), ("new_counts", NEW, ()), ("page", PAGE, (args.offset,))]:
+        page_rows, page_ms = sample(db, PAGE, (args.offset,), args.runs)
+        has_page_index = any(row[1] == "idx_tgdl_forward_queue_page" for row in indexes)
+        forced_ms = None
+        if has_page_index:
+            forced_rows, forced_ms = sample(db, PAGE_FORCED, (args.offset,), args.runs)
+            assert forced_rows == page_rows, "Forced page index changed pagination results"
+        plans = [("old_counts", OLD, ()), ("new_counts", NEW, ()), ("page", PAGE, (args.offset,))]
+        if has_page_index:
+            plans.append(("page_forced", PAGE_FORCED, (args.offset,)))
+        for label, query, params in plans:
             plan = db.execute("EXPLAIN QUERY PLAN " + query, params).fetchall()
             print(label, "plan:", " | ".join(str(p[-1]) for p in plan))
         print(f"Median {args.runs} samples (ms): old_counts={old_ms} new_counts={new_ms} page={page_ms}")
+        if forced_ms is not None:
+            print(f"Forced page index median (ms): {forced_ms}; identical rows: PASS")
         print("Counter equivalence: PASS")
     finally:
         db.close()
