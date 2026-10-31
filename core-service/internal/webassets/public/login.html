@@ -357,7 +357,7 @@
                 });
                 const data = await res.json();
                 if (res.ok) {
-                    showResetMsg(window.t('auth.token_sent'), 'ok');
+                    showResetMsg(window.t('auth.token_sent', 'Token printed to server logs'), 'ok');
                 } else {
                     showResetMsg(data.error || window.t('auth.token_request_failed'), 'error');
                 }
