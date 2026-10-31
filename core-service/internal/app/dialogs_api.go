@@ -256,6 +256,7 @@ func (a *App) browseDialogsRemote(ctx context.Context) ([]engine.Dialog, error) 
 	stage = "persist"
 	phaseStart = time.Now()
 	if err := a.saveDialogAccess(ctx, dialogs, observedAt); err != nil {
+		persistDuration = time.Since(phaseStart)
 		return nil, err
 	}
 	persistDuration = time.Since(phaseStart)
