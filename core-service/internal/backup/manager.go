@@ -43,12 +43,58 @@ type Manager struct {
 	cancel            context.CancelFunc
 	op                sync.Mutex
 	mu                sync.Mutex
+	mediaStatsMu      sync.Mutex
 	closed            bool
 	workers           map[int64]*worker
+	mediaProviders    map[int64]Provider
+	mediaTotals       MediaStreamStats
+	rangeSlots        chan struct{}
 	keys              map[int64][]byte
 	wg                sync.WaitGroup
 	strandedTransfers sync.Map
 }
+
+func (m *Manager) MediaStreamStats() MediaStreamStats {
+	m.mediaStatsMu.Lock()
+	defer m.mediaStatsMu.Unlock()
+	m.mu.Lock()
+	stats := m.mediaTotals
+	stats.RetryStatuses = make(map[int]int64, len(m.mediaTotals.RetryStatuses))
+	for status, count := range m.mediaTotals.RetryStatuses {
+		stats.RetryStatuses[status] = count
+	}
+	providers := make([]Provider, 0, len(m.mediaProviders))
+	for _, provider := range m.mediaProviders {
+		providers = append(providers, provider)
+	}
+	m.mu.Unlock()
+	if stats.RetryStatuses == nil {
+		stats.RetryStatuses = map[int]int64{}
+	}
+	for _, provider := range providers {
+		reader, ok := provider.(interface{ MediaStreamStats() MediaStreamStats })
+		if !ok {
+			continue
+		}
+		current := reader.MediaStreamStats()
+		addMediaStreamStats(&stats, current)
+	}
+	return stats
+}
+
+func addMediaStreamStats(total *MediaStreamStats, current MediaStreamStats) {
+	total.RequestAttempts += current.RequestAttempts
+	total.Retries += current.Retries
+	total.BytesFetched += current.BytesFetched
+	total.RetryWaitNanos += current.RetryWaitNanos
+	if total.RetryStatuses == nil {
+		total.RetryStatuses = map[int]int64{}
+	}
+	for status, count := range current.RetryStatuses {
+		total.RetryStatuses[status] += count
+	}
+}
+
 type worker struct {
 	running atomic.Bool
 	cancel  context.CancelFunc
@@ -86,7 +132,7 @@ func NewManager(ctx context.Context, opts Options) (*Manager, error) {
 		return nil, errors.New("backup database and credential secret are required")
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	m := &Manager{opts: opts, ctx: ctx, cancel: cancel, workers: map[int64]*worker{}, keys: map[int64][]byte{}}
+	m := &Manager{opts: opts, ctx: ctx, cancel: cancel, workers: map[int64]*worker{}, mediaProviders: map[int64]Provider{}, mediaTotals: MediaStreamStats{RetryStatuses: map[int]int64{}}, rangeSlots: make(chan struct{}, 2), keys: map[int64][]byte{}}
 	if _, err := opts.Writer.ExecContext(ctx, backupSchema); err != nil {
 		cancel()
 		return nil, err
@@ -190,9 +236,11 @@ func ensureBackupColumn(ctx context.Context, db *sql.DB) error {
 }
 func (m *Manager) Close() {
 	m.op.Lock()
+	m.mediaStatsMu.Lock()
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
+		m.mediaStatsMu.Unlock()
 		m.op.Unlock()
 		return
 	}
@@ -200,6 +248,8 @@ func (m *Manager) Close() {
 	m.cancel()
 	workers := m.workers
 	m.workers = map[int64]*worker{}
+	providers := m.mediaProviders
+	m.mediaProviders = map[int64]Provider{}
 	m.mu.Unlock()
 	m.op.Unlock()
 	m.wg.Wait()
@@ -208,11 +258,22 @@ func (m *Manager) Close() {
 		<-w.done
 	}
 	m.mu.Lock()
+	for _, p := range providers {
+		if reader, ok := p.(interface{ MediaStreamStats() MediaStreamStats }); ok {
+			addMediaStreamStats(&m.mediaTotals, reader.MediaStreamStats())
+		}
+	}
+	m.mu.Unlock()
+	for _, p := range providers {
+		_ = p.Close()
+	}
+	m.mu.Lock()
 	for id, key := range m.keys {
 		clear(key)
 		delete(m.keys, id)
 	}
 	m.mu.Unlock()
+	m.mediaStatsMu.Unlock()
 }
 func (m *Manager) available() error {
 	m.mu.Lock()
@@ -473,6 +534,23 @@ func (m *Manager) setKey(id int64, key []byte) {
 		m.keys[id] = append([]byte(nil), key...)
 	}
 }
+
+func (m *Manager) dropMediaProvider(id int64) {
+	m.mediaStatsMu.Lock()
+	defer m.mediaStatsMu.Unlock()
+	m.mu.Lock()
+	p := m.mediaProviders[id]
+	delete(m.mediaProviders, id)
+	m.mu.Unlock()
+	if p != nil {
+		_ = p.Close()
+		if reader, ok := p.(interface{ MediaStreamStats() MediaStreamStats }); ok {
+			m.mu.Lock()
+			addMediaStreamStats(&m.mediaTotals, reader.MediaStreamStats())
+			m.mu.Unlock()
+		}
+	}
+}
 func (m *Manager) Update(ctx context.Context, id int64, patch map[string]any) (map[string]any, error) {
 	m.op.Lock()
 	defer m.op.Unlock()
@@ -482,6 +560,15 @@ func (m *Manager) Update(ctx context.Context, id int64, patch map[string]any) (m
 	d, err := m.load(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	var remoteOnly int
+	if err = m.opts.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE remote_destination_id=?`, id).Scan(&remoteOnly); err != nil {
+		return nil, err
+	}
+	if remoteOnly > 0 {
+		if enabled, ok := patch["enabled"]; ok && enabled != true || patch["mode"] != nil || patch["config"] != nil {
+			return nil, errors.New("restore local media before disabling or changing this Google Drive destination")
+		}
 	}
 	if v, ok := patch["name"]; ok {
 		d.Name = cleanName(v)
@@ -548,6 +635,7 @@ func (m *Manager) Update(ctx context.Context, id int64, patch map[string]any) (m
 		}
 		return nil, err
 	}
+	m.dropMediaProvider(id)
 	d, err = m.load(ctx, id)
 	if err != nil {
 		return nil, err
@@ -566,12 +654,20 @@ func (m *Manager) Remove(ctx context.Context, id int64) (bool, error) {
 	if err := m.available(); err != nil {
 		return false, err
 	}
+	var remoteOnly int
+	if err := m.opts.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE remote_destination_id=?`, id).Scan(&remoteOnly); err != nil {
+		return false, err
+	}
+	if remoteOnly > 0 {
+		return false, errors.New("restore local media before removing this Google Drive destination")
+	}
 	m.stop(id)
 	res, err := m.opts.Writer.ExecContext(ctx, `DELETE FROM backup_destinations WHERE id=?`, id)
 	if err != nil {
 		return false, err
 	}
 	n, err := res.RowsAffected()
+	m.dropMediaProvider(id)
 	m.setKey(id, nil)
 	m.emit("backup_destination_removed", map[string]any{"destinationId": id})
 	m.Log("info", fmt.Sprintf("destination removed — #%d", id))
@@ -631,6 +727,96 @@ func (m *Manager) Test(ctx context.Context, id int64) (bool, string, error) {
 	}
 	return true, detail, nil
 }
+
+// MediaRange reads a completed, unencrypted Google Drive mirror object for
+// the authenticated media endpoint. Range length is capped by the provider.
+func (m *Manager) MediaRange(ctx context.Context, destinationID int64, name string, start, length int64) ([]byte, int64, error) {
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, 0, errors.New("backup manager is closed")
+	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	defer m.wg.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(m.ctx, cancel)
+	defer func() { stop(); cancel() }()
+	select {
+	case m.rangeSlots <- struct{}{}:
+		defer func() { <-m.rangeSlots }()
+	case <-ctx.Done():
+		return nil, 0, ctx.Err()
+	}
+	d, err := m.load(ctx, destinationID)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !d.Enabled || d.Provider != "gdrive" || d.Mode != "mirror" || d.Encrypted {
+		return nil, 0, errors.New("Google Drive media source is unavailable")
+	}
+	var ready int
+	if err = m.opts.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_jobs WHERE destination_id=? AND remote_path=? AND status='done' AND download_id IS NOT NULL`, destinationID, name).Scan(&ready); err != nil || ready == 0 {
+		if err == nil {
+			err = errors.New("Google Drive media object is not verified")
+		}
+		return nil, 0, err
+	}
+	m.mu.Lock()
+	p := m.mediaProviders[d.ID]
+	m.mu.Unlock()
+	if p == nil {
+		cfg, configErr := m.config(ctx, d)
+		if configErr != nil {
+			return nil, 0, configErr
+		}
+		created, createErr := m.provider(ctx, d, cfg)
+		if createErr != nil {
+			return nil, 0, createErr
+		}
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			_ = created.Close()
+			return nil, 0, errors.New("backup manager is closed")
+		}
+		p = m.mediaProviders[d.ID]
+		if p == nil {
+			m.mediaProviders[d.ID] = created
+			p = created
+		} else {
+			_ = created.Close()
+		}
+		m.mu.Unlock()
+	}
+	ranged, ok := p.(RangeProvider)
+	if !ok {
+		return nil, 0, errors.New("Google Drive provider does not support range reads")
+	}
+	return ranged.ReadRange(ctx, name, start, length)
+}
+
+func (m *Manager) MediaReady(ctx context.Context, destinationID int64, name string) error {
+	if err := m.available(); err != nil {
+		return err
+	}
+	d, err := m.load(ctx, destinationID)
+	if err != nil {
+		return err
+	}
+	if !d.Enabled || d.Provider != "gdrive" || d.Mode != "mirror" || d.Encrypted {
+		return errors.New("Google Drive media source is unavailable")
+	}
+	var ready int
+	if err = m.opts.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM backup_jobs WHERE destination_id=? AND remote_path=? AND status='done' AND download_id IS NOT NULL`, destinationID, name).Scan(&ready); err != nil {
+		return err
+	}
+	if ready == 0 {
+		return errors.New("Google Drive media object is not verified")
+	}
+	return nil
+}
+
 func keyVerifier(key []byte) []byte {
 	h := hmac.New(sha256.New, key)
 	h.Write([]byte("tgdl-backup-key-verifier-v1"))
@@ -645,6 +831,15 @@ func (m *Manager) Encryption(ctx context.Context, id int64, enabled bool, passph
 	d, err := m.load(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+	if enabled && !d.Encrypted {
+		var remoteOnly int
+		if err = m.opts.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE remote_destination_id=?`, id).Scan(&remoteOnly); err != nil {
+			return nil, err
+		}
+		if remoteOnly > 0 {
+			return nil, errors.New("restore local media before enabling encryption for this destination")
+		}
 	}
 	if unlockOnly && (!d.Encrypted || len(d.Salt) < 8) {
 		return nil, errors.New("encryption is not enabled for this destination")
@@ -699,6 +894,7 @@ func (m *Manager) Encryption(ctx context.Context, id int64, enabled bool, passph
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
+	m.dropMediaProvider(id)
 	m.setKey(id, key)
 	d.Encrypted = enabled
 	out := m.scrub(d)
@@ -735,6 +931,11 @@ BEGIN
  SELECT d.id,NEW.id,REPLACE(NEW.file_path,char(92),'/') FROM backup_destinations d
  WHERE d.enabled=1 AND d.mode='mirror'
  AND NOT EXISTS(SELECT 1 FROM backup_jobs j WHERE j.destination_id=d.id AND j.download_id=NEW.id);
+END;
+CREATE TRIGGER IF NOT EXISTS native_backup_local_media_restored AFTER UPDATE OF file_path ON downloads
+WHEN NEW.file_path IS NOT NULL AND NEW.file_path<>'' AND OLD.file_path IS NULL
+BEGIN
+ UPDATE downloads SET remote_destination_id=NULL WHERE id=NEW.id;
 END;
 CREATE TABLE IF NOT EXISTS native_backup_retention(job_id INTEGER PRIMARY KEY REFERENCES backup_jobs(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS native_backup_versions(job_id INTEGER PRIMARY KEY REFERENCES backup_jobs(id) ON DELETE CASCADE,version INTEGER NOT NULL DEFAULT 0);

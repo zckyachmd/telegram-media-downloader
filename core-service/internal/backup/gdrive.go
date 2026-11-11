@@ -52,6 +52,12 @@ type gdriveProvider struct {
 
 	mu      sync.Mutex
 	folders map[string]string // path under the root ("" = root) → folder ID
+	objects map[string]cachedDriveObject
+}
+
+type cachedDriveObject struct {
+	file    driveFile
+	expires time.Time
 }
 
 type driveFile struct {
@@ -85,7 +91,7 @@ func newGDriveAt(cfg map[string]any, ep gdriveEndpoints) (*gdriveProvider, error
 	}
 	form := url.Values{"grant_type": {"refresh_token"}, "client_id": {id}, "client_secret": {secret}, "refresh_token": {refresh}}
 	api := newCloudAPI("Google Drive", ep.token, form, "The refresh token was rejected; it may be expired or revoked. Generate a new one and edit the destination", decodeDriveError)
-	return &gdriveProvider{life: newCloudLife("Google Drive"), api: api, ep: ep, folderName: name, folderID: folderID, chunk: gdriveChunk, folders: map[string]string{}}, nil
+	return &gdriveProvider{life: newCloudLife("Google Drive"), api: api, ep: ep, folderName: name, folderID: folderID, chunk: gdriveChunk, folders: map[string]string{}, objects: map[string]cachedDriveObject{}}, nil
 }
 
 func (p *gdriveProvider) Close() error {
@@ -327,6 +333,46 @@ func (p *gdriveProvider) files(ctx context.Context, parent, name string) ([]driv
 	return out, err
 }
 
+func (p *gdriveProvider) object(ctx context.Context, name string) (driveFile, error) {
+	p.mu.Lock()
+	if cached, ok := p.objects[name]; ok && time.Now().Before(cached.expires) {
+		p.mu.Unlock()
+		return cached.file, nil
+	}
+	p.mu.Unlock()
+	dir, base := path.Split(name)
+	parent, err := p.folder(ctx, dir, false)
+	if err != nil || parent == "" {
+		if err == nil {
+			err = fs.ErrNotExist
+		}
+		return driveFile{}, err
+	}
+	found, err := p.files(ctx, parent, base)
+	if err != nil {
+		return driveFile{}, err
+	}
+	if len(found) == 0 {
+		return driveFile{}, fs.ErrNotExist
+	}
+	file := found[0]
+	for _, candidate := range found[1:] {
+		if candidate.ModifiedTime.After(file.ModifiedTime) {
+			file = candidate
+		}
+	}
+	p.mu.Lock()
+	p.objects[name] = cachedDriveObject{file: file, expires: time.Now().Add(2 * time.Minute)}
+	p.mu.Unlock()
+	return file, nil
+}
+
+func (p *gdriveProvider) invalidateObject(name string) {
+	p.mu.Lock()
+	delete(p.objects, name)
+	p.mu.Unlock()
+}
+
 func (p *gdriveProvider) Test(ctx context.Context) (string, error) {
 	ctx, done, err := p.life.begin(ctx)
 	if err != nil {
@@ -380,6 +426,7 @@ func (p *gdriveProvider) Upload(ctx context.Context, name string, src io.ReadSee
 	// Drive computes sha256Checksum itself; size alone never proves equality.
 	for _, f := range existing {
 		if f.Size == size && f.SHA256 != "" && strings.EqualFold(f.SHA256, want) {
+			p.invalidateObject(name)
 			return UploadResult{Bytes: size, ETag: f.MD5, Skipped: true}, nil
 		}
 	}
@@ -417,6 +464,7 @@ func (p *gdriveProvider) Upload(ctx context.Context, name string, src io.ReadSee
 		}
 		return UploadResult{}, errors.New("Google Drive uploaded file has an unexpected size or checksum")
 	}
+	p.invalidateObject(name)
 	return UploadResult{Bytes: size, ETag: file.MD5}, nil
 }
 
@@ -576,6 +624,7 @@ func (p *gdriveProvider) Delete(ctx context.Context, name string) error {
 			return err
 		}
 	}
+	p.invalidateObject(name)
 	return nil
 }
 
@@ -675,4 +724,57 @@ func (p *gdriveProvider) Download(ctx context.Context, name string, dst io.Write
 	_, err = p.api.do(ctx, cloudRequest{op: "files.download", method: http.MethodGet,
 		url: p.ep.api + "/files/" + url.PathEscape(file.ID) + "?alt=media&supportsAllDrives=true", once: true, out: dst})
 	return err
+}
+
+const gdriveMaxReadRange = 8 << 20
+
+// ReadRange fetches one bounded byte interval. A Drive response that ignores
+// Range is rejected before its body can grow beyond the caller's requested
+// size, so preview requests never turn into an accidental whole-file download.
+func (p *gdriveProvider) ReadRange(ctx context.Context, name string, start, length int64) ([]byte, int64, error) {
+	ctx, done, err := p.life.begin(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer done()
+	if validObject(name) != nil || start < 0 || length <= 0 || length > gdriveMaxReadRange {
+		return nil, 0, errors.New("invalid Google Drive range request")
+	}
+	file, err := p.object(ctx, name)
+	if err != nil {
+		return nil, 0, err
+	}
+	if file.Size <= 0 || start >= file.Size {
+		return nil, file.Size, errors.New("Google Drive range is outside the object")
+	}
+	end := start + min(length-1, file.Size-start-1)
+	var out boundedRangeBuffer
+	out.limit = end - start + 1
+	res, err := p.api.do(ctx, cloudRequest{op: "files.download range", method: http.MethodGet,
+		url:    p.ep.api + "/files/" + url.PathEscape(file.ID) + "?alt=media&supportsAllDrives=true",
+		header: http.Header{"Range": {fmt.Sprintf("bytes=%d-%d", start, end)}}, statusRequired: http.StatusPartialContent, retryBudget: cloudMediaRetryBudget, resetOut: out.Reset, out: &out})
+	if err != nil {
+		p.invalidateObject(name)
+		return nil, 0, err
+	}
+	want := fmt.Sprintf("bytes %d-%d/%d", start, end, file.Size)
+	if res.status != http.StatusPartialContent || res.header.Get("Content-Range") != want || int64(out.Len()) != end-start+1 {
+		return nil, 0, errors.New("Google Drive did not honor the requested byte range")
+	}
+	p.api.mediaBytes.Add(int64(out.Len()))
+	return out.Bytes(), file.Size, nil
+}
+
+func (p *gdriveProvider) MediaStreamStats() MediaStreamStats { return p.api.mediaStreamStats() }
+
+type boundedRangeBuffer struct {
+	bytes.Buffer
+	limit int64
+}
+
+func (b *boundedRangeBuffer) Write(p []byte) (int, error) {
+	if int64(b.Len()+len(p)) > b.limit {
+		return 0, errors.New("Google Drive range exceeded requested size")
+	}
+	return b.Buffer.Write(p)
 }

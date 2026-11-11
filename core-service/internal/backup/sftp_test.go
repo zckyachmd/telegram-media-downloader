@@ -60,7 +60,11 @@ func newFixtureSFTP(t *testing.T) *fixtureSFTP {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fixtureSFTP{t: t, listener: l, root: t.TempDir(), signer: signer, connections: map[net.Conn]bool{}, writeStarted: make(chan struct{}, 1)}
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &fixtureSFTP{t: t, listener: l, root: root, signer: signer, connections: map[net.Conn]bool{}, writeStarted: make(chan struct{}, 1)}
 	f.wg.Add(1)
 	go func() {
 		defer f.wg.Done()

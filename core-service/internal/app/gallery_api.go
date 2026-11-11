@@ -104,9 +104,9 @@ func (a *App) queryGalleryFiles(r *http.Request, q galleryQuery) ([]map[string]a
 	from := " FROM downloads d LEFT JOIN seekbar_sprites sb ON sb.download_id = d.id"
 	order := "d.created_at DESC, d.id DESC"
 	localColumns := `d.id, CAST(d.group_id AS TEXT) AS group_id, d.group_name, d.file_name,
-        d.file_path, d.file_size, d.file_type, CAST(d.created_at AS TEXT) AS created_at,
+	    COALESCE(d.file_path,(SELECT j.remote_path FROM backup_jobs j WHERE j.download_id=d.id AND j.destination_id=d.remote_destination_id AND j.status='done')) AS file_path, d.file_size, d.file_type, CAST(d.created_at AS TEXT) AS created_at,
         d.pending_until, d.rescued_at, d.pinned, sb.duration_sec, 'self' AS peer_id,
-        NULL AS peer_name`
+        NULL AS peer_name, CASE WHEN d.file_path IS NULL AND d.remote_destination_id IS NOT NULL THEN 1 ELSE 0 END AS remote_only`
 	var total int64
 	prefixMatches := false
 	if q.search != "" && !peers {
@@ -142,7 +142,7 @@ func (a *App) queryGalleryFiles(r *http.Request, q galleryQuery) ([]map[string]a
 		peerColumns := `d.remote_id AS id, d.group_id, d.group_name, d.file_name, d.file_path,
             d.file_size, d.file_type, d.created_at, NULL AS pending_until, NULL AS rescued_at,
             0 AS pinned, NULL AS duration_sec, d.peer_id, p.name AS peer_name,
-            CAST(d.created_at AS INTEGER) AS sort_ts`
+            CAST(d.created_at AS INTEGER) AS sort_ts, 0 AS remote_only`
 		peerWhere := strings.ReplaceAll(where, "d.pinned = 1", "0 = 1")
 		peerArgs := append([]any(nil), args...)
 		// Per-group routes honor peerId. All-media retains the released
@@ -155,7 +155,7 @@ func (a *App) queryGalleryFiles(r *http.Request, q galleryQuery) ([]map[string]a
 		from = " FROM (SELECT " + localColumns + from + " WHERE " + where +
 			" UNION ALL SELECT " + peerColumns + " FROM peer_downloads d LEFT JOIN peers p ON p.peer_id = d.peer_id WHERE " + peerWhere + ") d"
 		where, args = "1 = 1", append(args, peerArgs...)
-		localColumns = "d.id, d.group_id, d.group_name, d.file_name, d.file_path, d.file_size, d.file_type, d.created_at, d.pending_until, d.rescued_at, d.pinned, d.duration_sec, d.peer_id, d.peer_name"
+		localColumns = "d.id, d.group_id, d.group_name, d.file_name, d.file_path, d.file_size, d.file_type, d.created_at, d.pending_until, d.rescued_at, d.pinned, d.duration_sec, d.peer_id, d.peer_name, d.remote_only"
 		order = "d.sort_ts DESC, d.id DESC"
 	}
 	if q.pinnedFirst {
@@ -182,12 +182,12 @@ func (a *App) queryGalleryFiles(r *http.Request, q galleryQuery) ([]map[string]a
 		}
 	}()
 	for rows.Next() {
-		var id, pinned int64
+		var id, pinned, remoteOnly int64
 		var groupID, groupName, name, filePath, kind, peerID, peerName sql.NullString
 		var size, pending, rescued sql.NullInt64
 		var duration sql.NullFloat64
 		var created any
-		if err := rows.Scan(&id, &groupID, &groupName, &name, &filePath, &size, &kind, &created, &pending, &rescued, &pinned, &duration, &peerID, &peerName); err != nil {
+		if err := rows.Scan(&id, &groupID, &groupName, &name, &filePath, &size, &kind, &created, &pending, &rescued, &pinned, &duration, &peerID, &peerName, &remoteOnly); err != nil {
 			return nil, 0, err
 		}
 		displayName := groupName.String
@@ -197,7 +197,9 @@ func (a *App) queryGalleryFiles(r *http.Request, q galleryQuery) ([]map[string]a
 		fileName, folder := name.String, galleryFolder(kind.String)
 		stored := strings.ReplaceAll(filePath.String, "\\", "/")
 		fullPath := stored
-		if !strings.Contains(fullPath, "/") {
+		// Remote paths are stored exactly as backup object keys. A basename
+		// must not be rewritten into the local gallery folder layout.
+		if remoteOnly != 1 && !strings.Contains(fullPath, "/") {
 			// Filename-only legacy rows use the group layout. If that file is
 			// absent, an existing root file is authoritative (e.g. after reindex).
 			// Check both within downloads/ so a root basename cannot shadow an
@@ -226,6 +228,9 @@ func (a *App) queryGalleryFiles(r *http.Request, q galleryQuery) ([]map[string]a
 			"rescuedAt": nullableInt(rescued), "pinned": pinned == 1, "peer_id": peerID.String,
 			"peer_name": nullableString(peerName), "duration": nullableFloat(duration),
 		}
+		if remoteOnly == 1 {
+			item["remoteOnly"] = true
+		}
 		if !q.perGroup {
 			item["groupId"] = nullableString(groupID)
 			if displayName != "" {
@@ -249,7 +254,9 @@ func (a *App) queryGalleryFiles(r *http.Request, q galleryQuery) ([]map[string]a
 }
 
 func galleryNarrowing(q galleryQuery) (string, []any) {
-	where, args := "d.file_path IS NOT NULL AND d.file_path<>''", []any{}
+	where, args := `(d.file_path IS NOT NULL AND d.file_path<>'' OR (d.remote_destination_id IS NOT NULL AND EXISTS(
+		SELECT 1 FROM backup_destinations rd WHERE rd.id=d.remote_destination_id AND rd.enabled=1 AND rd.provider='gdrive' AND rd.mode='mirror' AND rd.encryption=0)
+		AND EXISTS(SELECT 1 FROM backup_jobs rj WHERE rj.destination_id=d.remote_destination_id AND rj.download_id=d.id AND rj.status='done' AND rj.remote_path IS NOT NULL AND rj.remote_path<>'')))`, []any{}
 	if q.groupID != "" {
 		where += " AND d.group_id = ?"
 		args = append(args, q.groupID)

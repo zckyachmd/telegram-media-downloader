@@ -202,6 +202,25 @@ func (f *fixtureDrive) serve(w http.ResponseWriter, r *http.Request) {
 			driveFail(w, 404, "notFound")
 			return
 		}
+		if r.URL.Query().Get("alt") == "media" {
+			bounds := strings.Split(strings.TrimPrefix(r.Header.Get("Range"), "bytes="), "-")
+			if len(bounds) != 2 {
+				driveFail(w, 416, "rangeNotSatisfiable")
+				return
+			}
+			start, startErr := strconv.ParseInt(bounds[0], 10, 64)
+			end, endErr := strconv.ParseInt(bounds[1], 10, 64)
+			if startErr != nil || endErr != nil || start < 0 || end < start || end >= int64(len(file.data)) {
+				driveFail(w, 416, "rangeNotSatisfiable")
+				return
+			}
+			length := end - start + 1
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(file.data)))
+			w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(file.data[start : end+1])
+			return
+		}
 		driveJSON(w, 200, f.resource(file))
 	case r.Method == http.MethodPost && r.URL.Path == "/drive/v3/files":
 		var meta struct {
@@ -506,6 +525,160 @@ func TestGDriveResumableUploadResumesDedupsListsAndDeletes(t *testing.T) {
 	}
 	if err = p.Delete(ctx, "../escape"); err == nil {
 		t.Fatal("path escape accepted")
+	}
+}
+
+func TestGDriveReadsBoundedRanges(t *testing.T) {
+	f := newFixtureDrive(t)
+	p := f.provider(f.config())
+	defer p.Close()
+	p.api.backoff, p.api.maxDelay = 20*time.Millisecond, 40*time.Millisecond
+	want := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
+	if _, err := p.Upload(context.Background(), "videos/sample.mp4", bytes.NewReader(want), int64(len(want)), nil); err != nil {
+		t.Fatal(err)
+	}
+	got, size, err := p.ReadRange(context.Background(), "videos/sample.mp4", 7, 9)
+	if err != nil || size != int64(len(want)) || !bytes.Equal(got, want[7:16]) {
+		t.Fatalf("range %q size=%d err=%v", got, size, err)
+	}
+	limited := 0
+	f.hook = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Query().Get("alt") != "media" || limited >= 2 {
+			return false
+		}
+		limited++
+		if limited == 1 {
+			w.Header().Set("Retry-After", "0")
+			driveFail(w, http.StatusTooManyRequests, "rateLimitExceeded")
+		} else {
+			driveFail(w, http.StatusForbidden, "userRateLimitExceeded")
+		}
+		return true
+	}
+	got, size, err = p.ReadRange(context.Background(), "videos/sample.mp4", 7, 9)
+	if err != nil || size != int64(len(want)) || !bytes.Equal(got, want[7:16]) || limited != 2 {
+		t.Fatalf("rate-limited range %q size=%d attempts=%d err=%v", got, size, limited, err)
+	}
+	stats := p.MediaStreamStats()
+	if stats.RequestAttempts != 4 || stats.Retries != 2 || stats.BytesFetched != 18 || stats.RetryStatuses[http.StatusTooManyRequests] != 1 || stats.RetryStatuses[http.StatusForbidden] != 1 || stats.RetryWaitNanos <= 0 {
+		t.Fatalf("media stats: %+v", stats)
+	}
+	f.hook = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Query().Get("alt") == "media" {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(want)
+			return true
+		}
+		return false
+	}
+	if _, _, err = p.ReadRange(context.Background(), "videos/sample.mp4", 2, 3); err == nil {
+		t.Fatal("accepted Drive response that ignored Range")
+	}
+	if _, _, err = p.ReadRange(context.Background(), "videos/sample.mp4", 0, gdriveMaxReadRange+1); err == nil {
+		t.Fatal("oversized range accepted")
+	}
+}
+
+func TestGDriveRateLimitCooldownIsSharedAcrossConcurrentRanges(t *testing.T) {
+	f := newFixtureDrive(t)
+	p := f.provider(f.config())
+	defer p.Close()
+	want := []byte("shared cooldown media")
+	if _, err := p.Upload(context.Background(), "videos/cooldown.mp4", bytes.NewReader(want), int64(len(want)), nil); err != nil {
+		t.Fatal(err)
+	}
+	mediaRequests := 0
+	f.hook = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Query().Get("alt") == "media" {
+			mediaRequests++
+			if mediaRequests == 1 {
+				w.Header().Set("Retry-After", "1")
+				driveFail(w, http.StatusTooManyRequests, "rateLimitExceeded")
+				return true
+			}
+		}
+		return false
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, _, err := p.ReadRange(context.Background(), "videos/cooldown.mp4", 0, 4)
+		firstDone <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		p.api.cooldownMu.Lock()
+		active := time.Now().Before(p.api.cooldownUntil)
+		p.api.cooldownMu.Unlock()
+		if active {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first range did not establish a cooldown")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		_, _, err := p.ReadRange(context.Background(), "videos/cooldown.mp4", 4, 4)
+		secondDone <- err
+	}()
+	time.Sleep(100 * time.Millisecond)
+	f.mu.Lock()
+	requestsDuringCooldown := mediaRequests
+	f.mu.Unlock()
+	if requestsDuringCooldown != 1 {
+		t.Fatalf("second range bypassed shared cooldown: media requests=%d", requestsDuringCooldown)
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first range: %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second range: %v", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if mediaRequests != 3 {
+		t.Fatalf("media request attempts=%d, want rate limit plus two successful ranges", mediaRequests)
+	}
+}
+
+func TestGDriveRangeReadHonorsCancellation(t *testing.T) {
+	f := newFixtureDrive(t)
+	p := f.provider(f.config())
+	defer p.Close()
+	data := []byte("cancel me during the remote range read")
+	if _, err := p.Upload(context.Background(), "videos/cancel.mp4", bytes.NewReader(data), int64(len(data)), nil); err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	f.hook = func(w http.ResponseWriter, r *http.Request) bool {
+		if r.URL.Query().Get("alt") != "media" {
+			return false
+		}
+		close(started)
+		<-r.Context().Done()
+		return true
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := p.ReadRange(ctx, "videos/cancel.mp4", 0, 8)
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("range request did not reach Drive")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled range read succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled range read did not stop")
 	}
 }
 

@@ -147,7 +147,7 @@ function _renderCard(dest) {
             ${progressBar}
             ${errBlock}
             <div class="flex items-center justify-end gap-1 mt-2 flex-wrap">
-                ${dest.mode === 'mirror' ? `<button data-act="cleanup" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-delete-bin-line mr-0.5"></i><span data-i18n="maintenance.backup.cleanup_uploaded">Clean uploaded files</span></button>` : ''}
+                ${dest.mode === 'mirror' && dest.provider === 'gdrive' && !dest.encryption ? `<button data-act="cleanup" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-delete-bin-line mr-0.5"></i><span data-i18n="maintenance.backup.cleanup_uploaded">Clean uploaded files</span></button>` : ''}
                 ${runButton}
                 ${pauseBtn}
                 <button data-act="test" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-plug-line mr-0.5"></i><span data-i18n="maintenance.backup.test">Test</span></button>
@@ -688,7 +688,11 @@ function _wireWizard(root, sheet, providers, existing) {
         const mode = root.querySelector('input[name="bk-mode"]:checked')?.value || 'mirror';
         root.querySelector('#bk-cron-row').style.display = mode === 'snapshot' ? '' : 'none';
         root.querySelector('#bk-retain-row').style.display = mode === 'snapshot' ? '' : 'none';
-        root.querySelector('#bk-delete-after-upload-row').style.display = mode === 'mirror' ? '' : 'none';
+        syncEvictionUi();
+    }
+    function syncEvictionUi() {
+        const row = root.querySelector('#bk-delete-after-upload-row');
+        if (row) row.style.display = root.querySelector('input[name="bk-mode"]:checked')?.value === 'mirror' && root.querySelector('#bk-provider')?.value === 'gdrive' && !root.querySelector('#bk-enc')?.checked ? '' : 'none';
     }
     root.querySelectorAll('input[name="bk-mode"]').forEach((el) =>
         el.addEventListener('change', syncModeUi),
@@ -699,6 +703,7 @@ function _wireWizard(root, sheet, providers, existing) {
         const checked = root.querySelector('#bk-enc')?.checked;
         const pass = root.querySelector('#bk-pass-row');
         if (pass) pass.style.display = checked ? '' : 'none';
+        syncEvictionUi();
     }
     root.querySelector('#bk-enc')?.addEventListener('change', syncEncUi);
     syncEncUi();

@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -24,10 +25,11 @@ import (
 // errors and retry/backoff with Retry-After support.
 
 const (
-	cloudResponseLimit = 8 << 20
-	cloudAttempts      = 5
-	cloudMaxRetryAfter = 2 * time.Minute
-	cloudTokenSkew     = time.Minute
+	cloudResponseLimit    = 8 << 20
+	cloudAttempts         = 5
+	cloudMaxRetryAfter    = 2 * time.Minute
+	cloudMediaRetryBudget = 10 * time.Second
+	cloudTokenSkew        = time.Minute
 )
 
 type cloudLife struct {
@@ -124,12 +126,20 @@ type cloudAPI struct {
 	backoff   time.Duration
 	maxDelay  time.Duration
 
-	tokenURL  string
-	tokenForm url.Values
-	tokenHint string
-	tokenMu   sync.Mutex
-	access    string
-	expiry    time.Time
+	tokenURL      string
+	tokenForm     url.Values
+	tokenHint     string
+	tokenMu       sync.Mutex
+	access        string
+	expiry        time.Time
+	cooldownMu    sync.Mutex
+	cooldownUntil time.Time
+	mediaAttempts atomic.Int64
+	mediaRetries  atomic.Int64
+	mediaBytes    atomic.Int64
+	mediaWait     atomic.Int64
+	mediaStatusMu sync.Mutex
+	mediaStatuses map[int]int64
 }
 
 func newCloudAPI(service, tokenURL string, form url.Values, hint string, decode func(int, []byte) (string, bool)) *cloudAPI {
@@ -151,7 +161,7 @@ func newCloudAPI(service, tokenURL string, form url.Values, hint string, decode 
 		// Bearer tokens must never follow a redirect to another origin.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
-	return &cloudAPI{service: service, client: client, transport: transport, decode: decode, backoff: time.Second, maxDelay: 30 * time.Second, tokenURL: tokenURL, tokenForm: form, tokenHint: hint}
+	return &cloudAPI{service: service, client: client, transport: transport, decode: decode, backoff: time.Second, maxDelay: 30 * time.Second, tokenURL: tokenURL, tokenForm: form, tokenHint: hint, mediaStatuses: map[int]int64{}}
 }
 
 type cloudRequest struct {
@@ -167,6 +177,11 @@ type cloudRequest struct {
 	part     int64
 	// accept lists non-2xx statuses returned to the caller instead of failing.
 	accept []int
+	// statusRequired rejects a successful response with the wrong status before
+	// copying its body (for example, a server that ignored a byte Range).
+	statusRequired int
+	retryBudget    time.Duration
+	resetOut       func()
 	// once disables automatic retries of transport and retriable service
 	// failures, for requests whose outcome the caller must establish itself.
 	once   bool
@@ -179,6 +194,16 @@ type cloudResponse struct {
 }
 
 func (c *cloudAPI) close() { c.transport.CloseIdleConnections() }
+
+func (c *cloudAPI) mediaStreamStats() MediaStreamStats {
+	c.mediaStatusMu.Lock()
+	statuses := make(map[int]int64, len(c.mediaStatuses))
+	for status, count := range c.mediaStatuses {
+		statuses[status] = count
+	}
+	c.mediaStatusMu.Unlock()
+	return MediaStreamStats{RequestAttempts: c.mediaAttempts.Load(), Retries: c.mediaRetries.Load(), BytesFetched: c.mediaBytes.Load(), RetryWaitNanos: c.mediaWait.Load(), RetryStatuses: statuses}
+}
 
 // token returns a cached access token, refreshing it shortly before expiry.
 func (c *cloudAPI) token(ctx context.Context, stale string) (string, error) {
@@ -222,7 +247,13 @@ func retryAfter(h http.Header) time.Duration {
 		return 0
 	}
 	if s, err := strconv.ParseInt(v, 10, 64); err == nil {
-		return time.Duration(max(s, 0)) * time.Second
+		if s <= 0 {
+			return 0
+		}
+		if s > int64(cloudMaxRetryAfter/time.Second) {
+			return cloudMaxRetryAfter + time.Second
+		}
+		return time.Duration(s) * time.Second
 	}
 	if t, err := http.ParseTime(v); err == nil {
 		return max(time.Until(t), 0)
@@ -250,8 +281,31 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 func (c *cloudAPI) do(ctx context.Context, r cloudRequest) (cloudResponse, error) {
 	refreshed := false
 	stale := ""
+	started := time.Now()
 	for attempt := 0; ; attempt++ {
+		isMediaRange := r.op == "files.download range"
+		c.cooldownMu.Lock()
+		cooldown := time.Until(c.cooldownUntil)
+		c.cooldownMu.Unlock()
+		if cooldown > 0 {
+			if r.retryBudget > 0 && time.Since(started)+cooldown > r.retryBudget {
+				return cloudResponse{}, fmt.Errorf("%s %s: retry budget exceeded", c.service, r.op)
+			}
+			waitStarted := time.Now()
+			if e := sleepContext(ctx, cooldown); e != nil {
+				return cloudResponse{}, fmt.Errorf("%s %s: %w", c.service, r.op, e)
+			}
+			if isMediaRange {
+				c.mediaWait.Add(time.Since(waitStarted).Nanoseconds())
+			}
+		}
+		if r.resetOut != nil {
+			r.resetOut()
+		}
 		var used string
+		if isMediaRange {
+			c.mediaAttempts.Add(1)
+		}
 		res, err := c.once(ctx, r, stale, &used)
 		stale = ""
 		if err == nil {
@@ -264,12 +318,20 @@ func (c *cloudAPI) do(ctx context.Context, r cloudRequest) (cloudResponse, error
 		isService := errors.As(err, &ce)
 		if isService && ce.status == http.StatusUnauthorized && !r.noAuth && !refreshed {
 			// An access token can be revoked or expire early: refresh once.
+			if r.op == "files.download range" {
+				c.mediaRetries.Add(1)
+			}
 			refreshed = true
 			stale = used
 			attempt--
 			continue
 		}
 		retriable := !isService || ce.retry
+		if isMediaRange && isService && ce.retry {
+			c.mediaStatusMu.Lock()
+			c.mediaStatuses[ce.status]++
+			c.mediaStatusMu.Unlock()
+		}
 		if r.once || !retriable || attempt+1 >= cloudAttempts {
 			return cloudResponse{}, err
 		}
@@ -280,8 +342,29 @@ func (c *cloudAPI) do(ctx context.Context, r cloudRequest) (cloudResponse, error
 		if hinted > cloudMaxRetryAfter {
 			return cloudResponse{}, err
 		}
-		if e := sleepContext(ctx, c.delay(attempt, hinted)); e != nil {
+		if isService {
+			if ce.retry && (ce.status == http.StatusTooManyRequests || ce.status == http.StatusForbidden) {
+				delay := c.delay(attempt, hinted)
+				c.cooldownMu.Lock()
+				if until := time.Now().Add(delay); until.After(c.cooldownUntil) {
+					c.cooldownUntil = until
+				}
+				c.cooldownMu.Unlock()
+			}
+		}
+		delay := c.delay(attempt, hinted)
+		if r.retryBudget > 0 && time.Since(started)+delay > r.retryBudget {
+			return cloudResponse{}, fmt.Errorf("%s %s: retry budget exceeded", c.service, r.op)
+		}
+		if isMediaRange {
+			c.mediaRetries.Add(1)
+		}
+		waitStarted := time.Now()
+		if e := sleepContext(ctx, delay); e != nil {
 			return cloudResponse{}, fmt.Errorf("%s %s: %w", c.service, r.op, e)
+		}
+		if isMediaRange {
+			c.mediaWait.Add(time.Since(waitStarted).Nanoseconds())
 		}
 	}
 }
@@ -328,6 +411,9 @@ func (c *cloudAPI) once(ctx context.Context, r cloudRequest, stale string, used 
 	}
 	defer resp.Body.Close()
 	if r.out != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if r.statusRequired != 0 && resp.StatusCode != r.statusRequired {
+			return cloudResponse{}, &cloudError{service: c.service, op: r.op, status: resp.StatusCode, code: "unexpected response"}
+		}
 		if _, err = io.Copy(r.out, contextReader{ctx, resp.Body}); err != nil {
 			return cloudResponse{}, fmt.Errorf("%s %s: transport error reading response", c.service, r.op)
 		}

@@ -19,6 +19,26 @@ import (
 	"github.com/botnick/telegram-media-downloader/core-service/internal/store"
 )
 
+type mediaStatsFixture struct {
+	Provider
+	stats MediaStreamStats
+}
+
+func (p mediaStatsFixture) MediaStreamStats() MediaStreamStats { return p.stats }
+
+func TestManagerMediaStreamStatsAggregatesProviderCounters(t *testing.T) {
+	m := &Manager{
+		mediaTotals: MediaStreamStats{RequestAttempts: 2, Retries: 1, BytesFetched: 7, RetryWaitNanos: 11, RetryStatuses: map[int]int64{429: 1}},
+		mediaProviders: map[int64]Provider{
+			1: mediaStatsFixture{stats: MediaStreamStats{RequestAttempts: 3, Retries: 2, BytesFetched: 13, RetryWaitNanos: 17, RetryStatuses: map[int]int64{403: 2, 429: 1}}},
+		},
+	}
+	got := m.MediaStreamStats()
+	if got.RequestAttempts != 5 || got.Retries != 3 || got.BytesFetched != 20 || got.RetryWaitNanos != 28 || got.RetryStatuses[403] != 2 || got.RetryStatuses[429] != 2 {
+		t.Fatalf("aggregated media stats: %+v", got)
+	}
+}
+
 func fixtureManager(t *testing.T, factory Factory) (*Manager, *store.DB, string) {
 	t.Helper()
 	dir := t.TempDir()
@@ -118,6 +138,30 @@ func TestDeleteAfterUploadWaitsForEveryEnabledMirror(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("delete callback called %d times, want 1", calls)
+	}
+}
+
+func TestRemoteOnlyMediaProtectsItsDriveDestination(t *testing.T) {
+	m, db, _ := fixtureManager(t, nil)
+	destination, err := m.Create(context.Background(), map[string]any{"name": "Drive", "provider": "gdrive", "enabled": false, "mode": "mirror"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := destination["id"].(int64)
+	if _, err = db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,remote_destination_id) VALUES('g',1,'video.mp4',?)`, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.Update(context.Background(), id, map[string]any{"enabled": false}); err == nil {
+		t.Fatal("disabled destination with remote-only media")
+	}
+	if _, err = m.Update(context.Background(), id, map[string]any{"config": map[string]any{"folderName": "elsewhere"}}); err == nil {
+		t.Fatal("changed source config with remote-only media")
+	}
+	if _, err = m.Encryption(context.Background(), id, true, "passphrase", false); err == nil {
+		t.Fatal("encrypted source with remote-only media")
+	}
+	if _, err = m.Remove(context.Background(), id); err == nil {
+		t.Fatal("removed source with remote-only media")
 	}
 }
 

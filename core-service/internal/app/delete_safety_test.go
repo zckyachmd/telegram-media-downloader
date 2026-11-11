@@ -1,7 +1,9 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -131,11 +133,23 @@ func TestEvictMirroredDownloadKeepsCatalogAndBackupRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	destinationID, _ := dest.LastInsertId()
-	media, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,file_path,file_size,status) VALUES('g',7,'media.bin','archive/media.bin',14,'completed')`)
+	media, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,file_path,file_size,file_type,status) VALUES('g',7,'media.bin','archive/media.bin',14,'photo','completed')`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	downloadID, _ := media.LastInsertId()
+	thumbPath := thumbCachePath(filepath.Join(a.dataDir, "thumbs"), downloadID)
+	if err = os.MkdirAll(filepath.Dir(thumbPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	thumbBytes := []byte("RIFF0000WEBP")
+	if err = os.WriteFile(thumbPath, thumbBytes, 0600); err != nil {
+		t.Fatal(err)
+	}
+	spritePath, metaPath := filepath.Join(a.dataDir, "seekbar", "1.webp"), filepath.Join(a.dataDir, "seekbar", "1.json")
+	if _, err = a.db.Writer.Exec(`INSERT INTO seekbar_sprites(download_id,sprite_path,meta_path,generated_at) VALUES(?,?,?,1)`, downloadID, spritePath, metaPath); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := a.db.Writer.Exec(`UPDATE backup_jobs SET status='done',remote_path='archive/media.bin',bytes_uploaded=14 WHERE destination_id=? AND download_id=?`, destinationID, downloadID); err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +159,13 @@ func TestEvictMirroredDownloadKeepsCatalogAndBackupRecord(t *testing.T) {
 	}
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("local file remains: %v", err)
+	}
+	if _, err := os.Stat(thumbPath); err != nil {
+		t.Fatalf("eviction removed reusable thumbnail: %v", err)
+	}
+	var seekbars int
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM seekbar_sprites WHERE download_id=?`, downloadID).Scan(&seekbars); err != nil || seekbars != 1 {
+		t.Fatalf("eviction invalidated seekbar sprite: count=%d err=%v", seekbars, err)
 	}
 	var path, remote, status string
 	var size, jobs int
@@ -161,8 +182,19 @@ func TestEvictMirroredDownloadKeepsCatalogAndBackupRecord(t *testing.T) {
 		t.Fatalf("catalog or mirror history lost: path=%q size=%d remote=%q status=%q rows=%d", path, size, remote, status, jobs)
 	}
 	files, total, err := a.queryGalleryFiles(httptest.NewRequest(http.MethodGet, "/api/downloads/all", nil), galleryQuery{limit: 50})
-	if err != nil || total != 0 || len(files) != 0 {
-		t.Fatalf("evicted media still appears in gallery: total=%d files=%d err=%v", total, len(files), err)
+	if err != nil || total != 1 || len(files) != 1 || files[0]["fullPath"] != "archive/media.bin" {
+		t.Fatalf("Drive-backed media missing from gallery: total=%d files=%d err=%v", total, len(files), err)
+	}
+	token, err := a.sessions.Create(context.Background(), "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbReq := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/thumbs/%d", downloadID), nil)
+	thumbReq.AddCookie(&http.Cookie{Name: a.sessions.CookieName(), Value: token})
+	thumbResponse := httptest.NewRecorder()
+	a.Handler().ServeHTTP(thumbResponse, thumbReq)
+	if thumbResponse.Code != http.StatusOK || !bytes.Equal(thumbResponse.Body.Bytes(), thumbBytes) {
+		t.Fatalf("cached thumb unavailable after eviction: status=%d body=%q", thumbResponse.Code, thumbResponse.Body.Bytes())
 	}
 }
 
@@ -221,6 +253,97 @@ func TestEvictMirroredDownloadWaitsForForwardAndKeepsItsHistory(t *testing.T) {
 	}
 	if downloadRows != 1 || backupRows != 1 || forwardRows != 1 {
 		t.Fatalf("history after cleanup: downloads=%d backups=%d forwards=%d", downloadRows, backupRows, forwardRows)
+	}
+}
+
+func TestEvictMirroredDownloadRequiresUsableDriveAndKeepsSharedFile(t *testing.T) {
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+
+	for _, tc := range []struct {
+		name, provider, status string
+		encrypted, disabled    bool
+	}{
+		{"other provider", "local", "done", false, false},
+		{"disabled Drive", "gdrive", "done", false, true},
+		{"encrypted Drive", "gdrive", "done", true, false},
+		{"failed upload", "gdrive", "failed", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stored := "safety/" + strings.ReplaceAll(tc.name, " ", "-") + ".mp4"
+			file := filepath.Join(a.downloadsDir, filepath.FromSlash(stored))
+			if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, []byte("media"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			dest, err := a.db.Writer.Exec(`INSERT INTO backup_destinations(name,provider,config_blob,enabled,encryption,mode,created_at) VALUES(?,?,X'00',1,?,'mirror',1)`, tc.name, tc.provider, tc.encrypted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			destinationID, _ := dest.LastInsertId()
+			media, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,file_path,file_size,file_type) VALUES('safety',?,?,?,5,'video')`, tc.name, filepath.Base(stored), stored)
+			if err != nil {
+				t.Fatal(err)
+			}
+			downloadID, _ := media.LastInsertId()
+			if _, err = a.db.Writer.Exec(`INSERT OR IGNORE INTO backup_jobs(destination_id,download_id,status,remote_path) VALUES(?,?,? ,?)`, destinationID, downloadID, tc.status, stored); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = a.db.Writer.Exec(`UPDATE backup_jobs SET status=?,remote_path=? WHERE destination_id=? AND download_id=?`, tc.status, stored, destinationID, downloadID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.disabled {
+				if _, err = a.db.Writer.Exec(`UPDATE backup_destinations SET enabled=0 WHERE id=?`, destinationID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			removed, err := a.evictMirroredDownload(context.Background(), downloadID, stored)
+			if err != nil || removed {
+				t.Fatalf("ineligible source evicted media: removed=%v err=%v", removed, err)
+			}
+			if _, err := os.Stat(file); err != nil {
+				t.Fatalf("local copy was removed: %v", err)
+			}
+			if _, err = a.db.Writer.Exec(`UPDATE backup_destinations SET enabled=0 WHERE id=?`, destinationID); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+
+	stored := "shared/shared.mp4"
+	file := filepath.Join(a.downloadsDir, filepath.FromSlash(stored))
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("shared"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := a.db.Writer.Exec(`INSERT INTO backup_destinations(name,provider,config_blob,mode,created_at) VALUES('Shared Drive','gdrive',X'00','mirror',1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationID, _ := dest.LastInsertId()
+	if _, err = a.db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,file_path,file_size,file_type) VALUES('shared',1,'shared.mp4',?,6,'video'),('shared',2,'shared.mp4',?,6,'video')`, stored, stored); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = a.db.Writer.Exec(`UPDATE backup_jobs SET status='done',remote_path=? WHERE destination_id=?`, stored, destinationID); err != nil {
+		t.Fatal(err)
+	}
+	var sharedID int64
+	if err = a.db.Reader.QueryRow(`SELECT id FROM downloads WHERE group_id='shared' AND message_id=1`).Scan(&sharedID); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := a.evictMirroredDownload(context.Background(), sharedID, stored)
+	if err != nil || !removed {
+		t.Fatalf("shared mirrored row not evicted: removed=%v err=%v", removed, err)
+	}
+	if _, err = os.Stat(file); err != nil {
+		t.Fatalf("remaining local reference lost its file: %v", err)
 	}
 }
 

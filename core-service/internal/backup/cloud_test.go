@@ -89,6 +89,9 @@ func TestCloudRetryAfterAndSanitizedCodes(t *testing.T) {
 	if got := retryAfter(http.Header{"Retry-After": {"3"}}); got != 3*time.Second {
 		t.Fatalf("seconds: %v", got)
 	}
+	if got := retryAfter(http.Header{"Retry-After": {"9223372036854775807"}}); got != cloudMaxRetryAfter+time.Second {
+		t.Fatalf("overflowing seconds: %v", got)
+	}
 	if got := retryAfter(http.Header{"Retry-After": {time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat)}}); got != 0 {
 		t.Fatalf("past date: %v", got)
 	}

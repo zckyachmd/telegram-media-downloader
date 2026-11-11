@@ -10,6 +10,13 @@ import (
 
 func registerBackupRoutes(mux *http.ServeMux, a *App) {
 	registerFullBackupRoutes(mux, a)
+	mux.Handle("GET /api/backup/media/stats", a.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"success": true,
+			"drive":   a.backups.MediaStreamStats(),
+			"stream":  a.driveMediaMetrics.snapshot(),
+		})
+	})))
 	mux.Handle("GET /api/backup/destinations/{id}/recovery", a.requireAdmin(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, ok := backupID(w, r)
 		if !ok {

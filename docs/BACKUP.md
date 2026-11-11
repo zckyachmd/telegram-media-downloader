@@ -60,6 +60,25 @@ A few details about mirror mode:
   uploaded again under its current path.
 - If you set `TGDL_DOWNLOADS_DIR` (media on another disk), the mirror reads
   from there. See [Configuration](CONFIGURATION.md).
+- For an **unencrypted Google Drive mirror**, you can opt in to deleting the
+  host copy after every enabled mirror has verified its upload. The catalog
+  remains available, and `/files/...` reads requested byte ranges from Drive
+  for preview and seeking. A 32 MiB on-disk range cache is kept under the app
+  data directory and pruned by least-recent use; blocks are cached only after
+  a repeat read, and whole files are never cached by default. Playback needs a
+  working Drive connection and uses one bounded Drive API media request per
+  cache block as the player reads or seeks. tgdl allows at most two remote
+  streams at once, shares a cooldown after retryable 403/429 responses, and
+  limits retry delays for a media range to 10 seconds before returning a
+  sanitized error. Repeated playback can still consume Drive API quota and
+  project egress; check the limits for your Google Cloud project. Encrypted
+  Drive mirrors cannot be streamed this way.
+- Admins can inspect process-lifetime stream and cache counters at
+  `GET /api/backup/media/stats`. Drive attempts, retries, retry statuses,
+  fetched bytes, and retry wait are reported separately from bytes served,
+  cache activity, and average/maximum/bucket-estimated p50/p95 time to first
+  byte. Counters reset when tgdl restarts; they do not represent total Google
+  Cloud project quota use.
 
 ## Providers
 

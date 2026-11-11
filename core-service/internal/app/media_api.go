@@ -67,6 +67,21 @@ func (a *App) handleFile(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := openMedia(a.downloadsDir, rel)
 	if err != nil {
+		if os.IsNotExist(err) {
+			var destinationID, size int64
+			var hash string
+			lookupErr := a.db.Reader.QueryRowContext(r.Context(), `SELECT d.remote_destination_id,COALESCE(d.file_size,0),COALESCE(d.file_hash,CAST(j.finished_at AS TEXT),'')
+				FROM downloads d JOIN backup_jobs j ON j.download_id=d.id AND j.destination_id=d.remote_destination_id
+				WHERE d.remote_destination_id IS NOT NULL AND j.remote_path=? AND j.status='done' LIMIT 1`, rel).Scan(&destinationID, &size, &hash)
+			if lookupErr == nil {
+				if err := a.backups.MediaReady(r.Context(), destinationID, rel); err != nil {
+					writeText(w, r, http.StatusBadGateway, "Google Drive media is temporarily unavailable")
+					return
+				}
+				a.serveDriveBackedMedia(w, r, destinationID, rel, path.Base(rel), size, hash)
+				return
+			}
+		}
 		a.autoPruneMissingFile(r, rel)
 		fileText(w, r, http.StatusNotFound, "File not found")
 		return
@@ -301,7 +316,7 @@ func (a *App) handleThumb(w http.ResponseWriter, r *http.Request) {
 	}
 	var stored, kind string
 	err = a.db.Reader.QueryRowContext(r.Context(), `SELECT COALESCE(file_path,''), COALESCE(file_type,'') FROM downloads WHERE id=?`, id).Scan(&stored, &kind)
-	if err != nil || !thumbnailKind(kind) || stored == "" {
+	if err != nil || !thumbnailKind(kind) {
 		w.Header().Set("Cache-Control", "no-store")
 		writeText(w, r, http.StatusNotFound, "No thumb")
 		return
@@ -311,6 +326,10 @@ func (a *App) handleThumb(w http.ResponseWriter, r *http.Request) {
 	name := hex.EncodeToString(key[:])[:32] + ".webp"
 	thumbPath := filepath.Join(thumbDir, name)
 	if !thumbFileNonEmpty(thumbPath) {
+		if stored == "" {
+			writeText(w, r, http.StatusNotFound, "No thumb")
+			return
+		}
 		f, openErr := openMedia(a.downloadsDir, stored)
 		if openErr != nil {
 			writeText(w, r, http.StatusNotFound, "No thumb")

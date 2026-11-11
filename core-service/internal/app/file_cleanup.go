@@ -137,13 +137,20 @@ func (a *App) evictMirroredDownload(ctx context.Context, id int64, stored string
 	if err != nil || !mirrored || unfinished || forwarding {
 		return false, err
 	}
-	if err = a.queueDeletedAssets(ctx, tx, where, id, name); err != nil {
+	var remoteDestination int64
+	err = tx.QueryRowContext(ctx, `SELECT d.id FROM backup_destinations d JOIN backup_jobs j ON j.destination_id=d.id
+		WHERE j.download_id=? AND j.remote_path=? AND j.status='done' AND d.enabled=1 AND d.mode='mirror'
+		AND d.provider='gdrive' AND d.encryption=0 ORDER BY d.id LIMIT 1`, id, name).Scan(&remoteDestination)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
 		return false, err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO tgdl_file_cleanup(path) SELECT file_path FROM downloads WHERE `+where, id, name); err != nil {
 		return false, err
 	}
-	res, err := tx.ExecContext(ctx, `UPDATE downloads SET file_path=NULL WHERE `+where, id, name)
+	res, err := tx.ExecContext(ctx, `UPDATE downloads SET file_path=NULL,remote_destination_id=? WHERE `+where, remoteDestination, id, name)
 	if err != nil {
 		return false, err
 	}

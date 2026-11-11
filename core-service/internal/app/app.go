@@ -71,6 +71,7 @@ type App struct {
 	monitorOp         sync.Mutex
 	dialogVersion     uint64             // monitorOp guards confirmed remote removals vs older listings
 	dialogListing     singleflight.Group // shares concurrent Telegram listings; never caches settled results
+	remoteBlocks      singleflight.Group
 	historyMu         sync.Mutex
 	historyJobs       map[string]*historyJob
 	historyCancel     map[string]context.CancelFunc
@@ -118,6 +119,8 @@ type App struct {
 	dedupWG              sync.WaitGroup
 	dedupClosed          bool
 	mediaMu              sync.RWMutex
+	remoteStreamSlots    chan struct{}
+	driveMediaMetrics    driveMediaMetrics
 	purgeMu              sync.Mutex
 	purgeEpoch           uint64 // guarded by purgeMu; invalidates unresolved URL requests
 	purgeWG              sync.WaitGroup
@@ -252,9 +255,11 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	a.seekbar = newSeekbarState()
 	a.faces = newFacesService(a)
 	a.downloadsDir = cfg.DownloadsDir
+	a.remoteStreamSlots = make(chan struct{}, 2)
 	if a.downloadsDir == "" {
 		a.downloadsDir = filepath.Join(cfg.DataDir, "downloads")
 	}
+	a.pruneDriveMediaCache(filepath.Join(a.dataDir, "cache", "gdrive-range"))
 	a.ctx, a.cancel = context.WithCancel(ctx)
 	a.releaseOwnership = release
 	a.cluster = cluster.Store{Writer: db.Writer, Reader: db.Reader}

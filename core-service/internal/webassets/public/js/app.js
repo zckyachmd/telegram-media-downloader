@@ -2507,6 +2507,9 @@ function _galleryTileHtml(file, originalIndex) {
               peerName || i18nT('gallery.scope.this_peer', 'peer'),
           )}</span></div>`
         : '';
+    const remoteBadgeOverlay = file.remoteOnly
+        ? `<div class="absolute top-2 left-2 px-1.5 py-0.5 rounded-md bg-black/65 text-white text-[10px]" title="${escapeHtml(i18nT('gallery.drive_only', 'Stored in Google Drive'))}"><i class="ri-cloud-line mr-0.5"></i>${escapeHtml(i18nT('gallery.drive_only_short', 'Drive'))}</div>`
+        : '';
     const peerSubInline =
         isPeerTile && peerName
             ? ` · <span class="text-tg-blue">${escapeHtml(
@@ -2535,6 +2538,7 @@ function _galleryTileHtml(file, originalIndex) {
     ${thumbInner}
     ${gridDocLabel}
     ${peerBadgeOverlay}
+    ${remoteBadgeOverlay}
 </div>
 ${pinChip}
 <div class="tile-text">

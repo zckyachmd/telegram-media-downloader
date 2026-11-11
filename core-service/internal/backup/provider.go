@@ -9,6 +9,14 @@ import (
 	"time"
 )
 
+type MediaStreamStats struct {
+	RequestAttempts int64         `json:"requestAttempts"`
+	Retries         int64         `json:"retries"`
+	BytesFetched    int64         `json:"bytesFetched"`
+	RetryWaitNanos  int64         `json:"retryWaitNanos"`
+	RetryStatuses   map[int]int64 `json:"retryStatuses"`
+}
+
 //go:embed providers.json
 var providerJSON []byte
 
@@ -63,6 +71,13 @@ type Provider interface {
 	List(context.Context, string) ([]Object, error)
 	Delete(context.Context, string) error
 	Close() error
+}
+
+// RangeProvider reads a bounded byte interval without materializing the whole
+// remote object. It is optional so backup destinations that cannot stream do
+// not have to pretend that they support it.
+type RangeProvider interface {
+	ReadRange(context.Context, string, int64, int64) ([]byte, int64, error)
 }
 type Factory func(context.Context, string, map[string]any) (Provider, error)
 
