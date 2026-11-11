@@ -105,6 +105,9 @@ function _renderCard(dest) {
         processing > 0
             ? `<div class="mt-2 h-1 bg-tg-bg/60 rounded overflow-hidden"><div class="bg-tg-blue h-full transition-all animate-pulse" style="width:35%"></div></div>`
             : '';
+    const runButton = dest.enabled
+        ? `<button data-act="run" class="tg-btn text-xs px-2 py-1"><i class="ri-play-circle-line mr-0.5"></i><span>${escapeHtml(dest.mode === 'mirror' ? i18nT('maintenance.backup.run_mirror', 'Sync media now') : i18nT('maintenance.backup.run_snapshot', 'Create state snapshot'))}</span></button>`
+        : `<button data-act="enable-run" class="tg-btn text-xs px-2 py-1"><i class="ri-play-circle-line mr-0.5"></i><span data-i18n="maintenance.backup.enable_run">Enable &amp; run now</span></button>`;
 
     return `
         <div class="bg-tg-panel rounded-xl p-4 flex flex-col gap-2 border border-tg-border/30" data-dest-id="${dest.id}">
@@ -145,7 +148,7 @@ function _renderCard(dest) {
             ${errBlock}
             <div class="flex items-center justify-end gap-1 mt-2 flex-wrap">
                 ${dest.mode === 'mirror' ? `<button data-act="cleanup" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-delete-bin-line mr-0.5"></i><span data-i18n="maintenance.backup.cleanup_uploaded">Clean uploaded files</span></button>` : ''}
-                <button data-act="run" class="tg-btn text-xs px-2 py-1"><i class="ri-play-circle-line mr-0.5"></i><span>${escapeHtml(dest.mode === 'mirror' ? i18nT('maintenance.backup.run_mirror', 'Sync media now') : i18nT('maintenance.backup.run_snapshot', 'Create state snapshot'))}</span></button>
+                ${runButton}
                 ${pauseBtn}
                 <button data-act="test" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-plug-line mr-0.5"></i><span data-i18n="maintenance.backup.test">Test</span></button>
                 <button data-act="edit" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-pencil-line mr-0.5"></i><span data-i18n="common.edit">Edit</span></button>
@@ -324,7 +327,21 @@ async function _onCardAction(destId, act) {
         if (act === 'run') {
             await api.post(`/api/backup/destinations/${destId}/run`, {});
             showToast(i18nT('maintenance.backup.run_started', 'Backup run started'), 'success');
+        } else if (act === 'enable-run') {
+            const ok = await confirmSheet({
+                title: i18nT('maintenance.backup.enable_run_title', 'Enable this destination and run now?'),
+                message: i18nT('maintenance.backup.enable_run_body', 'This enables uploads for this destination and starts a sync. If delete after upload is enabled, local media is removed after every enabled mirror confirms its copy.'),
+                confirmLabel: i18nT('maintenance.backup.enable_run', 'Enable & run now'),
+            });
+            if (!ok) return;
+            await api.put(`/api/backup/destinations/${destId}`, { enabled: true });
+            await api.post(`/api/backup/destinations/${destId}/run`, {});
+            showToast(i18nT('maintenance.backup.enable_run_started', 'Destination enabled; sync started'), 'success');
         } else if (act === 'cleanup') {
+            if (!dest.enabled) {
+                showToast(i18nT('maintenance.backup.cleanup_enable_first', 'Enable the destination before cleaning uploaded media'), 'error');
+                return;
+            }
             const ok = await confirmSheet({
                 title: i18nT('maintenance.backup.cleanup_title', 'Clean already-uploaded local media?'),
                 message: i18nT('maintenance.backup.cleanup_body', 'This removes local media files already confirmed on every enabled mirror destination. Download history, mirror records and files in Drive stay in place.'),

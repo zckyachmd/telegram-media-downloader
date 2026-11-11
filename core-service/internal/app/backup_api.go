@@ -150,10 +150,12 @@ func (a *App) handleBackupDestination(w http.ResponseWriter, r *http.Request) {
 		// Jobs are durable before acknowledgement; workers own archive/transfer lifetime.
 		if e := a.backups.Run(ctx, id); e != nil {
 			a.backups.Log("error", fmt.Sprintf("run failed for #%d: %v", id, e))
-			if !backup.IsRunRejection(e) {
-				writeJSONError(w, 500, e.Error())
-				return
+			status := http.StatusInternalServerError
+			if backup.IsRunRejection(e) {
+				status = http.StatusConflict
 			}
+			writeJSONError(w, status, e.Error())
+			return
 		}
 		out["started"] = true
 	case "POST /api/backup/destinations/{id}/cleanup":
