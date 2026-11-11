@@ -133,7 +133,11 @@ Compose reads `.env` next to `docker-compose.yml`. Start from
 | Variable | Default | Meaning |
 |---|---|---|
 | `TGDL_PORT` | `3000` | Host port mapped to the container's port 3000. |
-| `TGDL_MEM_LIMIT` | `8g` | Container memory limit. |
+| `TGDL_MEM_LIMIT` | `2g` | Container memory limit. |
+| `TGDL_CPU_LIMIT` | `2.0` | Container CPU limit. |
+| `GOMEMLIMIT` | unset | Soft Go runtime memory target; leave headroom below `TGDL_MEM_LIMIT` for ffmpeg and other processes. |
+| `TGDL_DOWNLOAD_THREADS` | `4` | Concurrent Telegram parts per file; lower this on constrained hosts. |
+| `FASTSTART_CONCURRENCY` | `2` | Concurrent MP4 faststart rewrites. |
 | `TZ`, `TGDL_DOWNLOADS_DIR`, `TRUST_PROXY`, `TGDL_SECURE_COOKIES`, `WATCHTOWER_URL`, `WATCHTOWER_HTTP_API_TOKEN`, `TGDL_NSFW_SIDECAR_URL`, `TGDL_NSFW_API_TOKEN` | see above | Passed to the server. |
 | `WATCHTOWER_HTTP_API_PERIODIC_POLLS` | `false` | `true` lets watchtower update all containers on a schedule, not only on **Install update**. |
 | `WATCHTOWER_SCHEDULE` | `0 0 4 * * *` | When to check, as a 6-field cron (seconds first) in the container's `TZ`; default daily at 04:00. |

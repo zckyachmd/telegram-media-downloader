@@ -40,6 +40,9 @@ services:
       # Optional NSFW sidecar (tgdl-nsfw service below). Empty = not used.
       - TGDL_NSFW_SIDECAR_URL=${TGDL_NSFW_SIDECAR_URL:-}
       - TGDL_NSFW_API_TOKEN=${TGDL_NSFW_API_TOKEN:-}
+      - GOMEMLIMIT=${GOMEMLIMIT:-}
+      - TGDL_DOWNLOAD_THREADS=${TGDL_DOWNLOAD_THREADS:-4}
+      - FASTSTART_CONCURRENCY=${FASTSTART_CONCURRENCY:-2}
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
       # The autoheal service restarts the container if it stops answering.
@@ -50,10 +53,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    cpus: "${TGDL_CPU_LIMIT:-2.0}"
+    mem_limit: ${TGDL_MEM_LIMIT:-2g}
     deploy:
       resources:
         limits:
-          cpus: "2.0"
+          cpus: "${TGDL_CPU_LIMIT:-2.0}"
           memory: ${TGDL_MEM_LIMIT:-2g}
         reservations:
           memory: 256m

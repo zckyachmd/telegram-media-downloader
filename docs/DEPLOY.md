@@ -56,8 +56,36 @@ and see [Configuration](CONFIGURATION.md).
 volume path, and start it the same way (Container Manager project or
 `docker compose -f docker-compose.synology.yml up -d`).
 
-To build the image from source, replace the `image:` and `pull_policy:` lines
-in `docker-compose.yml` with `build: .` inside a git checkout.
+### Raspberry Pi 4 and other 1 GiB hosts
+
+Before the first start, set conservative container limits in `.env` and use
+the Pi overlay so the host pulls the prebuilt ARM64 image instead of compiling
+the large Go dependency tree locally:
+
+```dotenv
+TGDL_MEM_LIMIT=512m
+TGDL_CPU_LIMIT=1.0
+GOMEMLIMIT=320MiB
+TGDL_DOWNLOAD_THREADS=1
+FASTSTART_CONCURRENCY=1
+```
+
+Start with:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.pi.yml up -d
+```
+
+Then open **Settings → Advanced → Use low-resource profile**. It limits new
+downloads and backfill batches, disables automatic seekbar and AI work, and
+keeps existing queue entries and files. Large media libraries should use an
+external USB disk; mount it into the container and set `TGDL_DOWNLOADS_DIR`.
+Leave optional AI sidecars stopped on a 1 GiB host.
+
+The root `docker-compose.yml` builds the local image from source. For a small
+production host, keep the Pi overlay enabled so Compose pulls the prebuilt
+multi-arch image instead; `pull_policy: always` takes precedence over the base
+file's build configuration.
 
 ### Optional AI sidecars
 

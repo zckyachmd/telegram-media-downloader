@@ -1,0 +1,6 @@
+# Raspberry Pi deployment overlay. Pull the multi-arch release image instead
+# of compiling the large Go dependency tree on the 1 GiB production host.
+services:
+  telegram-downloader:
+    image: ghcr.io/botnick/telegram-media-downloader:latest
+    pull_policy: always

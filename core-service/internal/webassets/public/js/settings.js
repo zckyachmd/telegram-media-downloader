@@ -600,6 +600,7 @@ export async function loadSettings() {
             // hardcoded constant the consumer uses, so a missing `advanced` block
             // (older config.json) renders defaults that match current behaviour.
             loadAdvanced(config);
+            wireLowResourceProfile();
 
             // Guest password sub-block (lives inside Dashboard Security).
             wireGuestPassword();
@@ -1774,6 +1775,64 @@ export function applyPreset(type) {
     }
 
     document.getElementById('setting-concurrent').dispatchEvent(new Event('input'));
+}
+
+function wireLowResourceProfile() {
+    const button = document.getElementById('setting-low-resource-profile');
+    if (!button || button.dataset.wired) return;
+    button.dataset.wired = '1';
+    button.addEventListener('click', async () => {
+        button.disabled = true;
+        try {
+            if (_autoSaveTimer) await _autoSaveFlush();
+            await api.post('/api/config', {
+                download: { concurrent: 2 },
+                advanced: {
+                    downloader: { minConcurrency: 1, maxConcurrency: 2 },
+                    history: { backpressureCap: 100, batchInsertSize: 25 },
+                    seekbar: { autoOnDownload: false, concurrency: 1 },
+                    nsfw: { enabled: false, preload: false },
+                    ai: { enabled: false },
+                },
+            });
+            for (const [id, value] of [
+                ['setting-concurrent', 2],
+                ['setting-adv-min-concurrency', 1],
+                ['setting-adv-max-concurrency', 2],
+                ['setting-adv-backpressure', 100],
+                ['setting-adv-batch-insert', 25],
+                ['setting-adv-seekbar-concurrency', 1],
+            ]) {
+                const input = document.getElementById(id);
+                if (input) input.value = String(value);
+            }
+            const concurrentValue = document.getElementById('concurrent-value');
+            if (concurrentValue) concurrentValue.textContent = '2';
+            const seekbarAuto = document.getElementById('setting-adv-seekbar-autoOnDownload');
+            if (seekbarAuto) {
+                seekbarAuto.classList.remove('active');
+                seekbarAuto.setAttribute('aria-checked', 'false');
+            }
+            showToast(
+                i18nT(
+                    'settings.resource_profile.applied',
+                    'Low-resource profile applied. Existing queue preserved.',
+                ),
+                'success',
+            );
+        } catch (e) {
+            showToast(
+                i18nTf(
+                    'settings.autosave.failed',
+                    { msg: e?.message || String(e) },
+                    `Save failed: ${e?.message || e}`,
+                ),
+                'error',
+            );
+        } finally {
+            button.disabled = false;
+        }
+    });
 }
 
 // ====== Proxy ===============================================================
