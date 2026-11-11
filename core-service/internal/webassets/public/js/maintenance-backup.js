@@ -338,10 +338,6 @@ async function _onCardAction(destId, act) {
             await api.post(`/api/backup/destinations/${destId}/run`, {});
             showToast(i18nT('maintenance.backup.enable_run_started', 'Destination enabled; sync started'), 'success');
         } else if (act === 'cleanup') {
-            if (!dest.enabled) {
-                showToast(i18nT('maintenance.backup.cleanup_enable_first', 'Enable the destination before cleaning uploaded media'), 'error');
-                return;
-            }
             const ok = await confirmSheet({
                 title: i18nT('maintenance.backup.cleanup_title', 'Clean already-uploaded local media?'),
                 message: i18nT('maintenance.backup.cleanup_body', 'This removes local media files already confirmed on every enabled mirror destination. Download history, mirror records and files in Drive stay in place.'),
