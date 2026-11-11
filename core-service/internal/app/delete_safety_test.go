@@ -113,6 +113,117 @@ func TestDeleteSharedFileKeepsRemainingOwner(t *testing.T) {
 	}
 }
 
+func TestEvictMirroredDownloadKeepsCatalogAndBackupRecord(t *testing.T) {
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	file := filepath.Join(a.downloadsDir, "archive", "media.bin")
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("mirrored media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := a.db.Writer.Exec(`INSERT INTO backup_destinations(name,provider,config_blob,mode,created_at) VALUES('Drive','gdrive',X'00','mirror',1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationID, _ := dest.LastInsertId()
+	media, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,file_path,file_size,status) VALUES('g',7,'media.bin','archive/media.bin',14,'completed')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadID, _ := media.LastInsertId()
+	if _, err := a.db.Writer.Exec(`UPDATE backup_jobs SET status='done',remote_path='archive/media.bin',bytes_uploaded=14 WHERE destination_id=? AND download_id=?`, destinationID, downloadID); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := a.evictMirroredDownload(context.Background(), downloadID, "archive/media.bin")
+	if err != nil || !removed {
+		t.Fatalf("evict mirrored file: removed=%v err=%v", removed, err)
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("local file remains: %v", err)
+	}
+	var path, remote, status string
+	var size, jobs int
+	if err := a.db.Reader.QueryRow(`SELECT COALESCE(file_path,''),file_size FROM downloads WHERE id=?`, downloadID).Scan(&path, &size); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Reader.QueryRow(`SELECT remote_path,status FROM backup_jobs WHERE download_id=?`, downloadID).Scan(&remote, &status); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM downloads WHERE group_id='g' AND message_id=7`).Scan(&jobs); err != nil {
+		t.Fatal(err)
+	}
+	if path != "" || size != 14 || remote != "archive/media.bin" || status != "done" || jobs != 1 {
+		t.Fatalf("catalog or mirror history lost: path=%q size=%d remote=%q status=%q rows=%d", path, size, remote, status, jobs)
+	}
+	files, total, err := a.queryGalleryFiles(httptest.NewRequest(http.MethodGet, "/api/downloads/all", nil), galleryQuery{limit: 50})
+	if err != nil || total != 0 || len(files) != 0 {
+		t.Fatalf("evicted media still appears in gallery: total=%d files=%d err=%v", total, len(files), err)
+	}
+}
+
+func TestEvictMirroredDownloadWaitsForForwardAndKeepsItsHistory(t *testing.T) {
+	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	file := filepath.Join(a.downloadsDir, "archive", "forward.bin")
+	if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dest, err := a.db.Writer.Exec(`INSERT INTO backup_destinations(name,provider,config_blob,mode,created_at) VALUES('Drive','gdrive',X'00','mirror',1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationID, _ := dest.LastInsertId()
+	media, err := a.db.Writer.Exec(`INSERT INTO downloads(group_id,message_id,file_name,file_path,file_size,status) VALUES('g',8,'forward.bin','archive/forward.bin',5,'completed')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downloadID, _ := media.LastInsertId()
+	if _, err := a.db.Writer.Exec(`UPDATE backup_jobs SET status='done',remote_path='archive/forward.bin' WHERE destination_id=? AND download_id=?`, destinationID, downloadID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.Exec(`INSERT INTO tgdl_forward_queue(group_id,message_id,record_id,file_path,status,created_at,updated_at) VALUES('g',8,?,'archive/forward.bin','processing',1,1)`, downloadID); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := a.evictMirroredDownload(context.Background(), downloadID, "archive/forward.bin")
+	if err != nil || removed {
+		t.Fatalf("active forward should defer mirror eviction: removed=%v err=%v", removed, err)
+	}
+	if _, err := os.Stat(file); err != nil {
+		t.Fatalf("forward source was removed before completion: %v", err)
+	}
+	if _, err := a.db.Writer.Exec(`UPDATE tgdl_forward_queue SET status='forwarded' WHERE group_id='g' AND message_id=8`); err != nil {
+		t.Fatal(err)
+	}
+	removed, err = a.evictMirroredDownload(context.Background(), downloadID, "archive/forward.bin")
+	if err != nil || !removed {
+		t.Fatalf("completed forward should allow mirror eviction: removed=%v err=%v", removed, err)
+	}
+	var downloadRows, backupRows, forwardRows int
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM downloads WHERE id=? AND file_path IS NULL`, downloadID).Scan(&downloadRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM backup_jobs WHERE download_id=? AND status='done'`, downloadID).Scan(&backupRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Reader.QueryRow(`SELECT COUNT(*) FROM tgdl_forward_queue WHERE group_id='g' AND message_id=8 AND status='forwarded'`).Scan(&forwardRows); err != nil {
+		t.Fatal(err)
+	}
+	if downloadRows != 1 || backupRows != 1 || forwardRows != 1 {
+		t.Fatalf("history after cleanup: downloads=%d backups=%d forwards=%d", downloadRows, backupRows, forwardRows)
+	}
+}
+
 func TestDeleteBatchBeyondSQLiteExpressionDepth(t *testing.T) {
 	a, err := newConfiguredTestApp(context.Background(), Config{DataDir: t.TempDir()})
 	if err != nil {

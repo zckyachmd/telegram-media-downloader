@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -184,6 +185,31 @@ func TestDirectScanQueueIsDurableIdempotentAndDoesNotCreateDownloadWork(t *testi
 	}
 }
 
+func TestDirectForwardCanBeEnabledWithoutDeleteAfterForward(t *testing.T) {
+	settings, err := normalizedAutoForward(nil, map[string]any{"directForward": true, "deleteAfterForward": false})
+	if err != nil || settings["directForward"] != true {
+		t.Fatalf("direct option should not require local deletion: %#v err=%v", settings, err)
+	}
+}
+
+func TestQueuedForwardTriesNativeForwardBeforeUploadingLocalFile(t *testing.T) {
+	a, fake := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "directForward": true, "deleteAfterForward": false, "captionMode": "native"})
+	if err := os.MkdirAll(a.downloadsDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.downloadsDir, "native.bin"), []byte("media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a.forward(context.Background(), forwardJob{groupID: "-1000000000123", groupName: "Source", messageID: 28, path: "native.bin"})
+	requests := fake.forwards()
+	if len(requests) != 1 || requests[0].Destination != "@Archive" || requests[0].MessageID != 28 {
+		t.Fatalf("native direct requests=%+v", requests)
+	}
+	if _, err := os.Stat(filepath.Join(a.downloadsDir, "native.bin")); err != nil {
+		t.Fatalf("local media was removed with delete-after-forward off: %v", err)
+	}
+}
+
 func TestDirectScanBackfillRemainsDedupedAfterForwardCompletes(t *testing.T) {
 	ctx := context.Background()
 	a, _ := forwardTestApp(t, map[string]any{"enabled": true, "destination": "@Archive", "captionMode": "native", "scanRoute": "direct"})
@@ -211,6 +237,76 @@ func TestDirectScanBackfillRemainsDedupedAfterForwardCompletes(t *testing.T) {
 	}
 	if jobs != 1 {
 		t.Fatalf("completed direct-forward job was enqueued again: jobs=%d", jobs)
+	}
+}
+
+func TestManualForwardBackfillPagesOldRecordsAndSkipsDuplicates(t *testing.T) {
+	ctx := context.Background()
+	a, fake := forwardTestApp(t, map[string]any{"enabled": false, "destination": "@Archive"})
+	if err := a.setForwardQueuePaused(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO downloads(group_id,group_name,message_id,file_name,file_size,status,file_path) VALUES
+		('-1000000000123','Source',10,'local.bin',5,'completed','Source/documents/local.bin'),
+		('-1000000000123','Source',20,'archived.bin',5,'completed',NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	token, err := a.sessions.Create(ctx, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(payload string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/forward-queue/backfill", strings.NewReader(payload))
+		req.AddCookie(&http.Cookie{Name: a.sessions.CookieName(), Value: token})
+		response := httptest.NewRecorder()
+		a.Handler().ServeHTTP(response, req)
+		if response.Code != http.StatusAccepted {
+			t.Fatalf("backfill status=%d body=%s", response.Code, response.Body.String())
+		}
+		var result map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	first := call(`{"groupId":"-1000000000123","destination":"@Archive","limit":1}`)
+	if first["queued"] != float64(1) || first["hasMore"] != true {
+		t.Fatalf("first batch=%#v", first)
+	}
+	cursor := int(first["nextBeforeMessageId"].(float64))
+	second := call(fmt.Sprintf(`{"groupId":"-1000000000123","destination":"@Archive","beforeMessageId":%d,"limit":1}`, cursor))
+	if second["queued"] != float64(1) || second["hasMore"] != false {
+		t.Fatalf("second batch=%#v", second)
+	}
+	repeated := call(`{"groupId":"-1000000000123","destination":"@Archive","limit":1}`)
+	if repeated["queued"] != float64(0) || repeated["skipped"] != float64(1) {
+		t.Fatalf("repeated batch=%#v", repeated)
+	}
+	var jobs, archived, direct int
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*),SUM(CASE WHEN COALESCE(file_path,'')='' THEN 1 ELSE 0 END),SUM(CASE WHEN stage='manual_direct' THEN 1 ELSE 0 END) FROM tgdl_forward_queue WHERE group_id='-1000000000123' AND status='pending'`).Scan(&jobs, &archived, &direct); err != nil {
+		t.Fatal(err)
+	}
+	if jobs != 2 || archived != 1 || direct != 2 {
+		t.Fatalf("queued records=%d archived=%d direct-first=%d", jobs, archived, direct)
+	}
+	var status string
+	if err := a.setForwardQueuePaused(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	job, err := a.claimForward(ctx)
+	if err != nil || job == nil {
+		t.Fatalf("claim manual forward=%+v err=%v", job, err)
+	}
+	a.forward(ctx, *job)
+	if len(fake.forwards()) != 1 {
+		t.Fatalf("manual direct requests=%d", len(fake.forwards()))
+	}
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT status FROM tgdl_forward_queue WHERE id=?`, job.queueID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "forwarded" {
+		t.Fatalf("manual forward status=%q", status)
 	}
 }
 
@@ -894,11 +990,11 @@ func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
 		t.Fatalf("unexpected uploads=%d", len(fake.calls()))
 	}
 	eventually(t, "local copy deletion", func() bool {
-		_, exists := rowPath(t, a, "-1000000000123", 10)
-		return !exists
+		stored, exists := rowPath(t, a, "-1000000000123", 10)
+		return exists && stored == ""
 	})
-	if _, exists := rowPath(t, a, "-1000000000123", 10); exists {
-		t.Fatal("direct-forwarded media was saved locally")
+	if stored, exists := rowPath(t, a, "-1000000000123", 10); !exists || stored != "" {
+		t.Fatal("direct-forwarded media bytes were not evicted while retaining its catalog row")
 	}
 
 	// With delete-after-forward off, the message must use the download/upload path.
@@ -912,6 +1008,7 @@ func TestAutoForwardWithoutDownloadRequiresDeleteAfterForward(t *testing.T) {
 	group := groups[0].(map[string]any)
 	settings := group["autoForward"].(map[string]any)
 	settings["deleteAfterForward"] = false
+	settings["directForward"] = false
 	group["autoForward"] = settings
 	cfg["groups"] = groups
 	err = a.config.Save(ctx, cfg)
@@ -1014,11 +1111,11 @@ func TestCustomCaptionUsesDirectForwardThenEdit(t *testing.T) {
 		t.Fatalf("unexpected upload calls: %d", len(fake.calls()))
 	}
 	eventually(t, "local copy deletion", func() bool {
-		_, exists := rowPath(t, a, "-1000000000123", 13)
-		return !exists
+		stored, exists := rowPath(t, a, "-1000000000123", 13)
+		return exists && stored == ""
 	})
-	if _, exists := rowPath(t, a, "-1000000000123", 13); exists {
-		t.Fatal("direct-forwarded media was saved locally")
+	if stored, exists := rowPath(t, a, "-1000000000123", 13); !exists || stored != "" {
+		t.Fatal("direct-forwarded media bytes were not evicted while retaining its catalog row")
 	}
 }
 
@@ -1164,7 +1261,9 @@ func TestForwardQueueSnapshotIncludesAllRetryableJobs(t *testing.T) {
 	statuses := []string{"pending", "processing", "forwarded", "failed", "interrupted", "not_applicable"}
 	for i, status := range statuses {
 		destinations := "[]"
-		if status == "forwarded" { destinations = `[{"settings":{"destination":"@Archive"},"status":"forwarded","method":"upload","fallbackReason":"Direct forward rejected; uploaded instead"}]` }
+		if status == "forwarded" {
+			destinations = `[{"settings":{"destination":"@Archive"},"status":"forwarded","method":"upload","fallbackReason":"Direct forward rejected; uploaded instead"}]`
+		}
 		if _, err := a.db.Writer.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,status,destinations_json,created_at,updated_at)
 			VALUES('-1000000000123','Source',?,?,?,1,1)`, i+1, status, destinations); err != nil {
 			t.Fatal(err)
@@ -1354,11 +1453,24 @@ func TestDirectForwardFailureDownloadsThenUploads(t *testing.T) {
 		t.Fatalf("fallback upload=%+v body=%q", calls[0].req, calls[0].body)
 	}
 	eventually(t, "fallback local copy deletion", func() bool {
-		_, exists := rowPath(t, a, "-1000000000123", 12)
-		return !exists
+		stored, exists := rowPath(t, a, "-1000000000123", 12)
+		return exists && stored == ""
 	})
-	if _, exists := rowPath(t, a, "-1000000000123", 12); exists {
-		t.Fatal("fallback download was retained despite delete-after-forward")
+	if stored, exists := rowPath(t, a, "-1000000000123", 12); !exists || stored != "" {
+		t.Fatal("fallback media bytes were not evicted while retaining its catalog row")
+	}
+	var downloadRows, forwardRows, attemptRows int
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM downloads WHERE group_id=? AND message_id=? AND file_path IS NULL`, "-1000000000123", 12).Scan(&downloadRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_forward_queue WHERE group_id=? AND message_id=? AND status='forwarded' AND destinations_json LIKE '%Direct forward was rejected; downloaded and uploaded instead%'`, "-1000000000123", 12).Scan(&forwardRows); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_processing_attempts WHERE group_id=? AND message_id=? AND forward_status='forwarded' AND local_deleted=1`, "-1000000000123", 12).Scan(&attemptRows); err != nil {
+		t.Fatal(err)
+	}
+	if downloadRows != 1 || forwardRows != 1 || attemptRows != 1 {
+		t.Fatalf("durable fallback history after cleanup: downloads=%d forwards=%d attempts=%d", downloadRows, forwardRows, attemptRows)
 	}
 }
 
@@ -1377,8 +1489,8 @@ func TestProtectedAutoForwardDownloadsAndUploadsProtectedCopy(t *testing.T) {
 		t.Fatalf("protected upload=%+v", call)
 	}
 	eventually(t, "protected copy deletion after forward", func() bool {
-		_, exists := rowPath(t, a, "-1000000000123", 20)
-		return !exists
+		stored, exists := rowPath(t, a, "-1000000000123", 20)
+		return exists && stored == ""
 	})
 }
 
@@ -1393,7 +1505,7 @@ var fiveBytes = mediaTransport(func(_ context.Context, _ telegram.Attachment, w 
 
 func rowPath(t *testing.T, a *App, group string, message int) (string, bool) {
 	t.Helper()
-	var path string
+	var path sql.NullString
 	err := a.db.Reader.QueryRow(`SELECT file_path FROM downloads WHERE group_id=? AND message_id=?`, group, message).Scan(&path)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false
@@ -1401,7 +1513,7 @@ func rowPath(t *testing.T, a *App, group string, message int) (string, bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return path, true
+	return path.String, true
 }
 
 func TestAutoForwardUploadsAndDeletesOnlyTheLocalCopy(t *testing.T) {
@@ -1416,7 +1528,7 @@ func TestAutoForwardUploadsAndDeletesOnlyTheLocalCopy(t *testing.T) {
 	if _, err := a.ingestTelegram(ctx, docMessage(10, 123, 77, "caption text"), "", "Source", "acct1", fiveBytes); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, "forwarded row removal", func() bool { _, ok := rowPath(t, a, "-1000000000123", 10); return !ok })
+	eventually(t, "forwarded local path removal", func() bool { p, ok := rowPath(t, a, "-1000000000123", 10); return ok && p == "" })
 	calls := fake.calls()
 	if len(calls) != 1 {
 		t.Fatalf("calls=%d", len(calls))

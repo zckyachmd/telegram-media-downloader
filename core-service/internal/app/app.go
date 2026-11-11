@@ -63,6 +63,7 @@ type App struct {
 	gateForwards      bool
 	forwarder         forwardSender
 	forwardActivityMu sync.Mutex
+	manualForwardMu   sync.Mutex
 	activeForwards    map[string]int
 	forwards          chan struct{}
 	accounts          *accounts.Repository
@@ -304,6 +305,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 	mux.Handle("POST /api/downloads/pin", a.requireAdmin(http.HandlerFunc(a.handleBatchPin)))
 	mux.Handle("POST /api/downloads/{id}/pin", a.requireAdmin(http.HandlerFunc(a.handlePin)))
 	mux.Handle("POST /api/forward-queue", a.requireAdmin(http.HandlerFunc(a.handleManualForwardEnqueue)))
+	mux.Handle("POST /api/forward-queue/backfill", a.requireAdmin(http.HandlerFunc(a.handleForwardBackfill)))
 	mux.Handle("POST /api/forward-queue/pause", a.requireAdmin(http.HandlerFunc(a.handleForwardQueuePause)))
 	mux.Handle("POST /api/forward-queue/resume", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueResume)))
 	mux.Handle("POST /api/forward-queue/retry-all", a.requireAdmin(http.HandlerFunc(a.handleForwardQueueRetryAll)))
@@ -373,6 +375,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 			a.hub.Broadcast(ws.Event{Type: kind, Flat: true, Payload: payload, Roles: []string{"admin"}})
 		},
 		LockSnapshot: func() func() { a.configMu.Lock(); return a.configMu.Unlock },
+		DeleteMedia:  a.evictMirroredDownload,
 	})
 	if err != nil {
 		a.Close()

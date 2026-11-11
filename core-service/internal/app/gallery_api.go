@@ -249,7 +249,7 @@ func (a *App) queryGalleryFiles(r *http.Request, q galleryQuery) ([]map[string]a
 }
 
 func galleryNarrowing(q galleryQuery) (string, []any) {
-	where, args := "1 = 1", []any{}
+	where, args := "d.file_path IS NOT NULL AND d.file_path<>''", []any{}
 	if q.groupID != "" {
 		where += " AND d.group_id = ?"
 		args = append(args, q.groupID)

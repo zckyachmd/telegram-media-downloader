@@ -144,6 +144,7 @@ function _renderCard(dest) {
             ${progressBar}
             ${errBlock}
             <div class="flex items-center justify-end gap-1 mt-2 flex-wrap">
+                ${dest.mode === 'mirror' ? `<button data-act="cleanup" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-delete-bin-line mr-0.5"></i><span data-i18n="maintenance.backup.cleanup_uploaded">Clean uploaded files</span></button>` : ''}
                 <button data-act="run" class="tg-btn text-xs px-2 py-1"><i class="ri-play-circle-line mr-0.5"></i><span>${escapeHtml(dest.mode === 'mirror' ? i18nT('maintenance.backup.run_mirror', 'Sync media now') : i18nT('maintenance.backup.run_snapshot', 'Create state snapshot'))}</span></button>
                 ${pauseBtn}
                 <button data-act="test" class="tg-btn-secondary text-xs px-2 py-1"><i class="ri-plug-line mr-0.5"></i><span data-i18n="maintenance.backup.test">Test</span></button>
@@ -323,6 +324,16 @@ async function _onCardAction(destId, act) {
         if (act === 'run') {
             await api.post(`/api/backup/destinations/${destId}/run`, {});
             showToast(i18nT('maintenance.backup.run_started', 'Backup run started'), 'success');
+        } else if (act === 'cleanup') {
+            const ok = await confirmSheet({
+                title: i18nT('maintenance.backup.cleanup_title', 'Clean already-uploaded local media?'),
+                message: i18nT('maintenance.backup.cleanup_body', 'This removes local media files already confirmed on every enabled mirror destination. Download history, mirror records and files in Drive stay in place.'),
+                confirmLabel: i18nT('maintenance.backup.cleanup_uploaded', 'Clean uploaded files'),
+                danger: true,
+            });
+            if (!ok) return;
+            const r = await api.post(`/api/backup/destinations/${destId}/cleanup`, {});
+            showToast(i18nTf('maintenance.backup.cleanup_done', { n: Number(r.cleaned) || 0 }, `Cleaned ${Number(r.cleaned) || 0} uploaded files`), 'success');
         } else if (act === 'pause') {
             await api.post(`/api/backup/destinations/${destId}/pause`, {});
         } else if (act === 'resume') {
@@ -583,6 +594,13 @@ async function _openWizard(existing) {
                         <input type="radio" name="bk-mode" value="manual" ${existing?.mode === 'manual' ? 'checked' : ''}>
                         <span><span class="text-tg-text text-sm" data-i18n="maintenance.backup.mode.manual">Manual only</span><br><span class="text-[11px] text-tg-textSecondary" data-i18n="maintenance.backup.mode.manual_help">No auto-uploads — fires only when you click "Run now".</span></span>
                     </label>
+                    <div id="bk-delete-after-upload-row" class="mb-3 rounded-lg border border-tg-border p-3">
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input id="bk-delete-after-upload" type="checkbox" ${existing?.deleteAfterUpload ? 'checked' : ''}>
+                            <span class="text-tg-text text-sm" data-i18n="maintenance.backup.delete_after_upload">Delete local media after upload</span>
+                        </label>
+                        <p class="ml-6 mt-1 text-[11px] text-tg-textSecondary" data-i18n="maintenance.backup.delete_after_upload_help">Removes the app's local media entry only after every enabled mirror destination has uploaded it successfully.</p>
+                    </div>
                     <div id="bk-cron-row" class="flex gap-2 items-center" style="display:none">
                         <label class="text-xs text-tg-textSecondary w-24">Cron</label>
                         <input id="bk-cron" class="tg-input w-full text-sm font-mono" value="${escapeHtml(existing?.cron || '0 3 * * *')}" placeholder="0 3 * * *">
@@ -653,6 +671,7 @@ function _wireWizard(root, sheet, providers, existing) {
         const mode = root.querySelector('input[name="bk-mode"]:checked')?.value || 'mirror';
         root.querySelector('#bk-cron-row').style.display = mode === 'snapshot' ? '' : 'none';
         root.querySelector('#bk-retain-row').style.display = mode === 'snapshot' ? '' : 'none';
+        root.querySelector('#bk-delete-after-upload-row').style.display = mode === 'mirror' ? '' : 'none';
     }
     root.querySelectorAll('input[name="bk-mode"]').forEach((el) =>
         el.addEventListener('change', syncModeUi),
@@ -726,6 +745,7 @@ function _wireWizard(root, sheet, providers, existing) {
             mode,
             cron: cron || null,
             retainCount,
+            deleteAfterUpload: mode === 'mirror' && !!root.querySelector('#bk-delete-after-upload')?.checked,
             encryption,
             passphrase: passphrase || undefined,
         };
@@ -750,6 +770,7 @@ function _wireWizard(root, sheet, providers, existing) {
                     mode: data.mode,
                     cron: data.cron,
                     retainCount: data.retainCount,
+                    deleteAfterUpload: data.deleteAfterUpload,
                 });
                 const r = await api.post(`/api/backup/destinations/${existing.id}/test`, {});
                 showToast(r.detail || (r.ok ? 'OK' : 'Failed'), r.ok ? 'success' : 'error');
@@ -782,6 +803,7 @@ function _wireWizard(root, sheet, providers, existing) {
                     mode: data.mode,
                     cron: data.cron,
                     retainCount: data.retainCount,
+                    deleteAfterUpload: data.deleteAfterUpload,
                     config: Object.keys(data.config).length ? data.config : undefined,
                 });
                 if (data.encryption !== existing.encryption || data.passphrase) {

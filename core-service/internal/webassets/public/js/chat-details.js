@@ -123,7 +123,7 @@ function forwardProtectionIsEnabled(settings = fwdSettingsNow()) {
 }
 
 function canTryDirectForwardNow(settings = fwdSettingsNow()) {
-    return settings.deleteAfterForward === true && !forwardProtectionIsEnabled(settings);
+    return !forwardProtectionIsEnabled(settings);
 }
 
 function updateChatAutoForward(patch) {
@@ -818,7 +818,7 @@ function render() {
     const forwardingConfigured = forwardRoutes.length > 0 && forwardRoutes.every((route) => String(route.destinationGroupId || '').trim());
     const forwardingEnabled = fwd.enabled === true;
     const forwardProtectionEnabled = forwardProtectionIsEnabled(fwd);
-    const canTryDirectForward = fwd.deleteAfterForward === true && !forwardProtectionEnabled;
+    const canTryDirectForward = !forwardProtectionEnabled;
     const topicRule = g?.topics || {};
     const forumTopics = Array.isArray(cur.forumTopics) ? cur.forumTopics : [];
     const selectedTopics = new Set((topicRule.ids || []).map(String));

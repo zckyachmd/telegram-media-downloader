@@ -67,7 +67,7 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 	}
 	var parallelForward *forwardJob
 	var directResult <-chan directForwardResult
-	if forward && forwardSettings["directForward"] == true && forwardSettings["deleteAfterForward"] == true && directForward != nil && ttl == 0 && !item.SkipDuplicates && len(matchingForwardRoutes(forwardSettings, telegram.MessageTopicID(message))) > 0 {
+	if forward && forwardSettings["directForward"] == true && directForward != nil && ttl == 0 && !item.SkipDuplicates && len(matchingForwardRoutes(forwardSettings, telegram.MessageTopicID(message))) > 0 {
 		cfg, _ := a.config.Load(ctx)
 		topicID := telegram.MessageTopicID(message)
 		needsUpload := false
@@ -170,6 +170,10 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 						a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "failed")
 						return
 					}
+					for i := range job.destinations {
+						job.destinations[i].Method = "upload"
+						job.destinations[i].FallbackReason = "Direct forward was rejected; downloaded and uploaded instead: " + a.safeForwardReason(result.err.Error())
+					}
 					job.stage = "fallback_upload"
 					a.updateForwardReservation(context.WithoutCancel(ctx), job, "pending", "")
 					select {
@@ -178,7 +182,8 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 					}
 					return
 				}
-				if err := a.finishProcessingAttempt(context.WithoutCancel(ctx), attemptID, "downloaded", "", record.SHA256, "forwarded", true); err != nil {
+				deleteAfterForward := forwardSettings["deleteAfterForward"] == true
+				if err := a.finishProcessingAttempt(context.WithoutCancel(ctx), attemptID, "downloaded", "", record.SHA256, "forwarded", deleteAfterForward); err != nil {
 					if a.output != nil {
 						fmt.Fprintf(a.output, "AutoForward: could not finalize forwarded download: %v\n", err)
 					}
@@ -187,7 +192,9 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 				a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "forwarded")
 				job.stage = "complete"
 				a.updateForwardReservation(context.WithoutCancel(ctx), job, "forwarded", "")
-				a.deleteForwarded(context.WithoutCancel(ctx), job)
+				if deleteAfterForward {
+					a.deleteForwarded(context.WithoutCancel(ctx), job)
+				}
 			}()
 		}
 	}

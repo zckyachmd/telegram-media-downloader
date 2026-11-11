@@ -439,7 +439,8 @@ func (p *gdriveProvider) session(ctx context.Context, target, parent, name strin
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	res, err := p.api.do(ctx, cloudRequest{op: "start upload", method: method, url: endpoint + "?uploadType=resumable&supportsAllDrives=true", body: body,
+	query := url.Values{"uploadType": {"resumable"}, "supportsAllDrives": {"true"}, "fields": {gdriveFileFields}}
+	res, err := p.api.do(ctx, cloudRequest{op: "start upload", method: method, url: endpoint + "?" + query.Encode(), body: body,
 		header: http.Header{"Content-Type": {"application/json; charset=UTF-8"}, "X-Upload-Content-Type": {contentType}, "X-Upload-Content-Length": {strconv.FormatInt(size, 10)}}})
 	if err != nil {
 		return "", err

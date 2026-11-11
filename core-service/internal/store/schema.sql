@@ -215,7 +215,8 @@ CREATE TABLE backup_destinations (
             total_bytes     INTEGER NOT NULL DEFAULT 0,
             total_files     INTEGER NOT NULL DEFAULT 0,
             throttle_bps    INTEGER,
-            created_at      INTEGER NOT NULL
+            created_at      INTEGER NOT NULL,
+            delete_after_upload INTEGER NOT NULL DEFAULT 0
         );
 
 CREATE TABLE backup_jobs (

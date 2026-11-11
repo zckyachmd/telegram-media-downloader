@@ -35,6 +35,7 @@ type Options struct {
 	Factory        Factory
 	// LockSnapshot freezes account/config file replacements while archiving.
 	LockSnapshot func() func()
+	DeleteMedia  func(context.Context, int64, string) (bool, error)
 }
 type Manager struct {
 	opts              Options
@@ -59,6 +60,7 @@ type destination struct {
 	Name, Provider     string
 	Blob               []byte
 	Enabled, Encrypted bool
+	DeleteAfterUpload  bool
 	Salt               []byte
 	Mode               string
 	Cron               sql.NullString
@@ -70,13 +72,13 @@ type destination struct {
 	Created            int64
 }
 
-const destinationColumns = `id,name,provider,config_blob,enabled,encryption,encryption_salt,mode,cron,COALESCE(retain_count,7),last_success_at,last_failure_at,last_error,total_bytes,total_files,throttle_bps,created_at`
+const destinationColumns = `id,name,provider,config_blob,enabled,encryption,encryption_salt,mode,cron,COALESCE(retain_count,7),last_success_at,last_failure_at,last_error,total_bytes,total_files,throttle_bps,created_at,delete_after_upload`
 
 type scanner interface{ Scan(...any) error }
 
 func scanDestination(s scanner) (destination, error) {
 	var d destination
-	err := s.Scan(&d.ID, &d.Name, &d.Provider, &d.Blob, &d.Enabled, &d.Encrypted, &d.Salt, &d.Mode, &d.Cron, &d.Retain, &d.Success, &d.Failure, &d.Error, &d.Bytes, &d.Files, &d.Throttle, &d.Created)
+	err := s.Scan(&d.ID, &d.Name, &d.Provider, &d.Blob, &d.Enabled, &d.Encrypted, &d.Salt, &d.Mode, &d.Cron, &d.Retain, &d.Success, &d.Failure, &d.Error, &d.Bytes, &d.Files, &d.Throttle, &d.Created, &d.DeleteAfterUpload)
 	return d, err
 }
 func NewManager(ctx context.Context, opts Options) (*Manager, error) {
@@ -90,6 +92,10 @@ func NewManager(ctx context.Context, opts Options) (*Manager, error) {
 		return nil, err
 	}
 	if err := ensureBackupColumn(ctx, opts.Writer); err != nil {
+		cancel()
+		return nil, err
+	}
+	if err := ensureDeleteAfterUploadColumn(ctx, opts.Writer); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -121,6 +127,36 @@ func NewManager(ctx context.Context, opts Options) (*Manager, error) {
 		go m.cleanupTransfers()
 	}
 	return m, nil
+}
+
+func ensureDeleteAfterUploadColumn(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(backup_destinations)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var def any
+		if err = rows.Scan(&cid, &name, &typ, &notnull, &def, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		found = found || name == "delete_after_upload"
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	_, err = db.ExecContext(ctx, `ALTER TABLE backup_destinations ADD COLUMN delete_after_upload INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 func ensureBackupColumn(ctx context.Context, db *sql.DB) error {
@@ -235,7 +271,7 @@ func (m *Manager) unlocked(d destination) bool {
 	return !d.Encrypted || len(m.keys[d.ID]) == 32
 }
 func (m *Manager) scrub(d destination) map[string]any {
-	return map[string]any{"id": d.ID, "name": d.Name, "provider": d.Provider, "enabled": d.Enabled, "mode": d.Mode, "cron": nullableString(d.Cron), "retainCount": d.Retain, "encryption": d.Encrypted, "encryptionUnlocked": m.unlocked(d), "lastSuccessAt": nullableInt(d.Success), "lastFailureAt": nullableInt(d.Failure), "lastError": nullableString(d.Error), "totalBytes": d.Bytes, "totalFiles": d.Files, "createdAt": d.Created}
+	return map[string]any{"id": d.ID, "name": d.Name, "provider": d.Provider, "enabled": d.Enabled, "mode": d.Mode, "cron": nullableString(d.Cron), "retainCount": d.Retain, "encryption": d.Encrypted, "encryptionUnlocked": m.unlocked(d), "deleteAfterUpload": d.DeleteAfterUpload, "lastSuccessAt": nullableInt(d.Success), "lastFailureAt": nullableInt(d.Failure), "lastError": nullableString(d.Error), "totalBytes": d.Bytes, "totalFiles": d.Files, "createdAt": d.Created}
 }
 func (m *Manager) List(ctx context.Context) ([]map[string]any, error) {
 	ds, err := m.destinations(ctx)
@@ -371,6 +407,7 @@ func (m *Manager) Create(ctx context.Context, input map[string]any) (map[string]
 		return nil, err
 	}
 	encrypted := input["encryption"] == true
+	deleteAfterUpload := mode == "mirror" && input["deleteAfterUpload"] == true
 	var salt, key, verifier []byte
 	if encrypted {
 		salt = make([]byte, 16)
@@ -391,7 +428,7 @@ func (m *Manager) Create(ctx context.Context, input map[string]any) (map[string]
 		return nil, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `INSERT INTO backup_destinations(name,provider,config_blob,enabled,encryption,encryption_salt,mode,cron,retain_count,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, name, provider, blob, input["enabled"] != false, encrypted, salt, mode, nullString(cron), retain, time.Now().UnixMilli())
+	res, err := tx.ExecContext(ctx, `INSERT INTO backup_destinations(name,provider,config_blob,enabled,encryption,encryption_salt,mode,cron,retain_count,created_at,delete_after_upload) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, name, provider, blob, input["enabled"] != false, encrypted, salt, mode, nullString(cron), retain, time.Now().UnixMilli(), deleteAfterUpload)
 	if err != nil {
 		return nil, err
 	}
@@ -475,6 +512,12 @@ func (m *Manager) Update(ctx context.Context, id int64, patch map[string]any) (m
 	if v, ok := patch["enabled"]; ok {
 		d.Enabled = v == true
 	}
+	if v, ok := patch["deleteAfterUpload"]; ok {
+		d.DeleteAfterUpload = v == true
+	}
+	if d.Mode != "mirror" {
+		d.DeleteAfterUpload = false
+	}
 	if cfg, ok := patch["config"].(map[string]any); ok {
 		old, e := m.config(ctx, d)
 		if e != nil {
@@ -498,7 +541,7 @@ func (m *Manager) Update(ctx context.Context, id int64, patch map[string]any) (m
 		}
 	}
 	m.stop(id)
-	_, err = m.opts.Writer.ExecContext(ctx, `UPDATE backup_destinations SET name=?,config_blob=?,enabled=?,mode=?,cron=?,retain_count=? WHERE id=?`, d.Name, d.Blob, d.Enabled, d.Mode, nullableString(d.Cron), d.Retain, id)
+	_, err = m.opts.Writer.ExecContext(ctx, `UPDATE backup_destinations SET name=?,config_blob=?,enabled=?,mode=?,cron=?,retain_count=?,delete_after_upload=? WHERE id=?`, d.Name, d.Blob, d.Enabled, d.Mode, nullableString(d.Cron), d.Retain, d.DeleteAfterUpload, id)
 	if err != nil {
 		if old, e := m.load(m.ctx, id); e == nil && old.Enabled {
 			m.start(id)

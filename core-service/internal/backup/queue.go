@@ -413,6 +413,11 @@ func (m *Manager) transfer(ctx context.Context, d destination, j job, p Provider
 		m.failed(ctx, d, j, err, false)
 		return
 	}
+	if j.Download.Valid {
+		if err := m.deleteMirroredMedia(ctx, j); err != nil {
+			m.Log("warn", fmt.Sprintf("delete mirrored media #%d: %v", j.Download.Int64, err))
+		}
+	}
 	if !j.Download.Valid {
 		if e := m.retention(ctx, d, j, p); e != nil {
 			m.Log("warn", fmt.Sprintf("retention on #%d remains pending: %v", d.ID, e))
@@ -428,6 +433,92 @@ func (m *Manager) transfer(ctx context.Context, d destination, j job, p Provider
 	m.emit("backup_done", payload)
 	if !result.Skipped {
 		m.Log("info", fmt.Sprintf("uploaded %s (%d B) → #%d", j.Remote.String, result.Bytes, d.ID))
+	}
+}
+
+func (m *Manager) deleteMirroredMedia(ctx context.Context, j job) error {
+	if m.opts.DeleteMedia == nil || !j.Download.Valid {
+		return nil
+	}
+	var enabled, unfinished bool
+	err := m.opts.Reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM backup_destinations WHERE enabled=1 AND mode='mirror' AND delete_after_upload=1), EXISTS(
+		SELECT 1 FROM backup_destinations d LEFT JOIN backup_jobs j ON j.destination_id=d.id AND j.download_id=?
+		WHERE d.enabled=1 AND d.mode='mirror' AND (j.id IS NULL OR j.status<>'done'))`, j.Download.Int64).Scan(&enabled, &unfinished)
+	if err != nil || !enabled || unfinished {
+		return err
+	}
+	_, err = m.opts.DeleteMedia(ctx, j.Download.Int64, j.Remote.String)
+	return err
+}
+
+func (m *Manager) CleanMirrored(ctx context.Context, destinationID int64) (int, error) {
+	m.op.Lock()
+	defer m.op.Unlock()
+	if err := m.available(); err != nil {
+		return 0, err
+	}
+	d, err := m.load(ctx, destinationID)
+	if err != nil {
+		return 0, err
+	}
+	if d.Mode != "mirror" {
+		return 0, errors.New("destination is not a media mirror")
+	}
+	if m.opts.DeleteMedia == nil {
+		return 0, errors.New("local media cleanup is unavailable")
+	}
+	cleaned, afterID := 0, int64(0)
+	var cleanupErr error
+	for {
+		rows, err := m.opts.Reader.QueryContext(ctx, `SELECT d.id,REPLACE(d.file_path,char(92),'/')
+			FROM downloads d JOIN backup_jobs j ON j.download_id=d.id AND j.destination_id=? AND j.status='done'
+			WHERE d.id>? AND d.file_path IS NOT NULL AND d.file_path<>'' AND NOT EXISTS(
+				SELECT 1 FROM backup_destinations mirror
+				LEFT JOIN backup_jobs mirror_job ON mirror_job.destination_id=mirror.id AND mirror_job.download_id=d.id
+				WHERE mirror.enabled=1 AND mirror.mode='mirror' AND (mirror_job.id IS NULL OR mirror_job.status<>'done'))
+			ORDER BY d.id LIMIT 500`, destinationID, afterID)
+		if err != nil {
+			return cleaned, err
+		}
+		type candidate struct {
+			id   int64
+			path string
+		}
+		batch := make([]candidate, 0, 500)
+		for rows.Next() {
+			var item candidate
+			if err = rows.Scan(&item.id, &item.path); err != nil {
+				rows.Close()
+				return cleaned, err
+			}
+			batch = append(batch, item)
+		}
+		err = rows.Err()
+		if closeErr := rows.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return cleaned, err
+		}
+		if len(batch) == 0 {
+			return cleaned, cleanupErr
+		}
+		for _, item := range batch {
+			if item.id > afterID {
+				afterID = item.id
+			}
+			removed, err := m.opts.DeleteMedia(ctx, item.id, item.path)
+			if removed {
+				cleaned++
+			}
+			if err != nil {
+				m.Log("warn", fmt.Sprintf("clean mirrored media #%d: %v", item.id, err))
+				if cleanupErr == nil {
+					cleanupErr = fmt.Errorf("download #%d: %w", item.id, err)
+				}
+				continue
+			}
+		}
 	}
 }
 

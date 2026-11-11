@@ -320,13 +320,13 @@
                         : data.error || window.t('auth.invalid_password');
                     errorDiv.classList.remove('hidden');
                     btn.disabled = false;
-                    label.textContent = window.t('auth.sign_in');
+                    label.textContent = window.t('auth.sign_in', 'Sign in');
                 }
             } catch (err) {
                 errorDiv.textContent = window.t('auth.connection_error');
                 errorDiv.classList.remove('hidden');
                 btn.disabled = false;
-                label.textContent = window.t('auth.sign_in');
+                label.textContent = window.t('auth.sign_in', 'Sign in');
             }
         });
 

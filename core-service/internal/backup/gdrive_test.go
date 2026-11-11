@@ -271,7 +271,7 @@ func (f *fixtureDrive) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fixtureDrive) startSession(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Query().Get("uploadType") != "resumable" {
+	if r.URL.Query().Get("uploadType") != "resumable" || r.URL.Query().Get("fields") != gdriveFileFields {
 		driveFail(w, 400, "badRequest")
 		return
 	}

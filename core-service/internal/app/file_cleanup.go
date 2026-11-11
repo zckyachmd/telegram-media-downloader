@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/ws"
 )
 
 func mediaName(stored string) (string, error) {
@@ -101,6 +103,60 @@ func (a *App) deleteByWhere(r *http.Request, where string, args ...any) (int64, 
 		return 0, err
 	}
 	return count, errors.Join(a.drainFileCleanup(r.Context()), a.library.CleanDerived(r.Context()))
+}
+
+func (a *App) evictMirroredDownload(ctx context.Context, id int64, stored string) (bool, error) {
+	name, err := mediaName(stored)
+	if err != nil {
+		return false, err
+	}
+	name = filepath.ToSlash(name)
+	a.mediaMu.RLock()
+	defer a.mediaMu.RUnlock()
+	tx, err := a.db.Writer.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	where := `id=? AND REPLACE(file_path,char(92),'/')=?`
+	if _, err = tx.ExecContext(ctx, `UPDATE downloads SET file_path=file_path WHERE `+where, id, name); err != nil {
+		return false, err
+	}
+	var path sql.NullString
+	if err = tx.QueryRowContext(ctx, `SELECT file_path FROM downloads WHERE `+where, id, name).Scan(&path); errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	} else if err != nil {
+		return false, err
+	}
+	var mirrored, unfinished, forwarding bool
+	err = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM backup_jobs WHERE download_id=? AND remote_path=? AND status='done'), EXISTS(
+		SELECT 1 FROM backup_destinations d LEFT JOIN backup_jobs j ON j.destination_id=d.id AND j.download_id=?
+		WHERE d.enabled=1 AND d.mode='mirror' AND (j.id IS NULL OR j.status<>'done')), EXISTS(
+		SELECT 1 FROM tgdl_forward_queue q WHERE (q.record_id=? OR (q.group_id=(SELECT group_id FROM downloads WHERE id=?) AND q.message_id=(SELECT message_id FROM downloads WHERE id=?)))
+		AND q.status IN ('pending','processing','failed','interrupted','uncertain'))`, id, name, id, id, id, id).Scan(&mirrored, &unfinished, &forwarding)
+	if err != nil || !mirrored || unfinished || forwarding {
+		return false, err
+	}
+	if err = a.queueDeletedAssets(ctx, tx, where, id, name); err != nil {
+		return false, err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO tgdl_file_cleanup(path) SELECT file_path FROM downloads WHERE `+where, id, name); err != nil {
+		return false, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE downloads SET file_path=NULL WHERE `+where, id, name)
+	if err != nil {
+		return false, err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil || changed == 0 {
+		return false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	cleanupErr := errors.Join(a.drainFileCleanup(ctx), a.library.CleanDerived(ctx))
+	a.hub.Broadcast(ws.Event{Type: "file_deleted", Flat: true, Payload: map[string]any{"id": id}})
+	return true, cleanupErr
 }
 
 func (a *App) queueDeletedAssets(ctx context.Context, tx *sql.Tx, where string, args ...any) error {

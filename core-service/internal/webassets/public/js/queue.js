@@ -619,6 +619,8 @@ function renderForwardQueue(data) {
             ? i18nT('queue.forward.stage.fallback_download', 'Downloading fallback')
             : item.stage === 'fallback_upload'
                 ? i18nT('queue.forward.stage.fallback_upload', 'Uploading fallback')
+                : item.stage === 'manual_direct'
+                    ? i18nT('queue.forward.stage.manual_direct', 'Trying direct forward')
                 : (item.stage || '—');
         const reason = item.reason ? `<span class="text-red-400/80 truncate" title="${escapeHtml(item.reason)}">${escapeHtml(item.reason)}</span>` : '';
         const retryAt = Number(item.retryAt || 0) > Date.now() ? ` · retry ${escapeHtml(new Date(Number(item.retryAt)).toLocaleTimeString())}` : '';
@@ -999,6 +1001,50 @@ document.addEventListener('click', async (event) => {
         showToast(error?.message || 'Retry failed', 'error');
         button.disabled = false;
     }
+});
+
+document.addEventListener('submit', async (event) => {
+    const form = event.target.closest('#queue-forward-backfill-form');
+    if (!form) return;
+    event.preventDefault();
+    const values = new FormData(form);
+    const payload = {
+        groupId: String(values.get('groupId') || '').trim(),
+        destination: String(values.get('destination') || '').trim(),
+        beforeMessageId: Number(values.get('beforeMessageId') || 0),
+        limit: Number(values.get('limit') || 50),
+    };
+    const button = form.querySelector('[type="submit"]');
+    const result = document.getElementById('queue-forward-backfill-result');
+    button.disabled = true;
+    try {
+        const response = await api.post('/api/forward-queue/backfill', payload);
+        const cursor = form.querySelector('[name="beforeMessageId"]');
+        if (response.hasMore) {
+            cursor.value = String(response.nextBeforeMessageId || '');
+            button.disabled = false;
+        } else if (result) {
+            button.disabled = true;
+        }
+        if (result) result.textContent = i18nTf(
+            response.hasMore ? 'queue.forward.backfill.result_more' : 'queue.forward.backfill.result_done',
+            { scanned: response.scanned, queued: response.queued, skipped: response.skipped, cursor: response.nextBeforeMessageId || '—' },
+            `Scanned ${response.scanned}; queued ${response.queued}; skipped ${response.skipped}. ${response.hasMore ? `Continue before message ${response.nextBeforeMessageId}.` : 'No more older records.'}`,
+        );
+        await loadSnapshot();
+    } catch (error) {
+        if (result) result.textContent = error?.data?.error || error?.message || 'Backfill failed';
+        button.disabled = false;
+    }
+});
+
+document.getElementById('queue-forward-backfill-form')?.addEventListener('input', (event) => {
+    const form = event.currentTarget;
+    if (event.target.name === 'groupId' || event.target.name === 'destination') {
+        form.querySelector('[name="beforeMessageId"]').value = '';
+        document.getElementById('queue-forward-backfill-result').textContent = '';
+    }
+    form.querySelector('[type="submit"]').disabled = false;
 });
 
 // ============ Filtering / sorting / search ============

@@ -78,7 +78,7 @@ func registerBackupRoutes(mux *http.ServeMux, a *App) {
 		}
 		writeJSON(w, 200, map[string]any{"success": done})
 	})))
-	for _, route := range []string{"PUT /api/backup/destinations/{id}", "DELETE /api/backup/destinations/{id}", "GET /api/backup/destinations/{id}/config", "GET /api/backup/destinations/{id}/status", "GET /api/backup/destinations/{id}/jobs", "POST /api/backup/destinations/{id}/test", "POST /api/backup/destinations/{id}/run", "POST /api/backup/destinations/{id}/pause", "POST /api/backup/destinations/{id}/resume", "POST /api/backup/destinations/{id}/encryption", "POST /api/backup/destinations/{id}/unlock"} {
+	for _, route := range []string{"PUT /api/backup/destinations/{id}", "DELETE /api/backup/destinations/{id}", "GET /api/backup/destinations/{id}/config", "GET /api/backup/destinations/{id}/status", "GET /api/backup/destinations/{id}/jobs", "POST /api/backup/destinations/{id}/test", "POST /api/backup/destinations/{id}/run", "POST /api/backup/destinations/{id}/cleanup", "POST /api/backup/destinations/{id}/pause", "POST /api/backup/destinations/{id}/resume", "POST /api/backup/destinations/{id}/encryption", "POST /api/backup/destinations/{id}/unlock"} {
 		mux.Handle(route, a.requireAdmin(http.HandlerFunc(a.handleBackupDestination)))
 	}
 }
@@ -156,6 +156,14 @@ func (a *App) handleBackupDestination(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out["started"] = true
+	case "POST /api/backup/destinations/{id}/cleanup":
+		status = 400
+		var cleaned int
+		cleaned, err = a.backups.CleanMirrored(ctx, id)
+		out["cleaned"] = cleaned
+		if err == nil {
+			a.backups.Log("info", fmt.Sprintf("cleaned %d already-mirrored media files for #%d", cleaned, id))
+		}
 	case "POST /api/backup/destinations/{id}/pause", "POST /api/backup/destinations/{id}/resume":
 		paused := r.Pattern == "POST /api/backup/destinations/{id}/pause"
 		err = a.backups.Pause(ctx, id, paused)

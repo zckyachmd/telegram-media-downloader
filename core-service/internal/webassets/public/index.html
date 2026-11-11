@@ -1783,6 +1783,18 @@
                                         <i class="ri-restart-line" aria-hidden="true"></i><span data-i18n="queue.forward.retry_all_button">Retry failed &amp; interrupted (0)</span>
                                     </button>
                                     <p id="queue-forward-worker-state" class="text-[10px] text-tg-textSecondary" role="note"></p>
+                                    <details class="relative basis-full">
+                                        <summary class="cursor-pointer text-xs text-tg-blue hover:underline" data-i18n="queue.forward.backfill.title">Forward download history…</summary>
+                                        <form id="queue-forward-backfill-form" class="mt-2 grid grid-cols-1 sm:grid-cols-5 gap-2 p-3 rounded-lg bg-tg-bg/50 border border-tg-border/50">
+                                            <input name="groupId" class="tg-input text-xs" placeholder="Source group ID" aria-label="Source group ID" required>
+                                            <input name="destination" class="tg-input text-xs" placeholder="Destination ID or @username" aria-label="Destination ID or @username" required>
+                                            <input name="beforeMessageId" type="number" min="1" class="tg-input text-xs" placeholder="Before message ID (optional)" aria-label="Before message ID (optional)">
+                                            <input name="limit" type="number" min="1" max="100" value="50" class="tg-input text-xs" aria-label="Batch size">
+                                            <button type="submit" class="tg-btn tg-btn-sm min-h-10" data-i18n="queue.forward.backfill.submit">Queue batch</button>
+                                            <p class="sm:col-span-5 text-[10px] text-tg-textSecondary" data-i18n="queue.forward.backfill.help">Direct forward is tried first. If needed, the app downloads from Telegram or uses the local file. Start the monitor for download fallback. Repeat batches with the returned cursor.</p>
+                                            <p id="queue-forward-backfill-result" class="sm:col-span-5 text-xs text-tg-textSecondary" role="status" aria-live="polite"></p>
+                                        </form>
+                                    </details>
                                   </div>
                                 </div>
                             </div>

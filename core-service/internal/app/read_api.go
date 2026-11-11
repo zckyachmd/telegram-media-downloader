@@ -404,7 +404,7 @@ type groupAggregate struct {
 }
 
 func (a *App) groupAggregates(r *http.Request) ([]groupAggregate, error) {
-	rows, err := a.db.Reader.QueryContext(r.Context(), `SELECT CAST(group_id AS TEXT), COALESCE(MAX(NULLIF(group_name,'')), CAST(group_id AS TEXT)), COUNT(*), COALESCE(SUM(file_size),0) FROM downloads GROUP BY group_id ORDER BY group_id`)
+	rows, err := a.db.Reader.QueryContext(r.Context(), `SELECT CAST(group_id AS TEXT), COALESCE(MAX(NULLIF(group_name,'')), CAST(group_id AS TEXT)), COUNT(CASE WHEN file_path IS NOT NULL AND file_path<>'' THEN 1 END), COALESCE(SUM(CASE WHEN file_path IS NOT NULL AND file_path<>'' THEN file_size ELSE 0 END),0) FROM downloads GROUP BY group_id ORDER BY group_id`)
 	if err != nil {
 		return nil, err
 	}

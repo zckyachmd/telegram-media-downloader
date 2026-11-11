@@ -69,6 +69,96 @@ func addSource(t *testing.T, db *store.DB, dir, name, content string, msg int) i
 	}
 	return id
 }
+
+func TestDeleteAfterUploadWaitsForEveryEnabledMirror(t *testing.T) {
+	m, db, dir := fixtureManager(t, nil)
+	create := func(name string, deleteAfterUpload bool) int64 {
+		d, err := m.Create(context.Background(), map[string]any{
+			"name": name, "provider": "local", "config": map[string]any{"rootPath": filepath.Join(dir, name)},
+			"mode": "mirror", "enabled": false, "deleteAfterUpload": deleteAfterUpload,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d["id"].(int64)
+	}
+	first := create("first", true)
+	second := create("second", false)
+	if _, err := db.Writer.Exec(`UPDATE backup_destinations SET enabled=1 WHERE id IN (?,?)`, first, second); err != nil {
+		t.Fatal(err)
+	}
+	downloadID := addSource(t, db, dir, "media.bin", "media", 1)
+	if _, err := db.Writer.Exec(`UPDATE backup_jobs SET status='done' WHERE destination_id=? AND download_id=?`, first, downloadID); err != nil {
+		t.Fatal(err)
+	}
+	var remote string
+	if err := db.Reader.QueryRow(`SELECT remote_path FROM backup_jobs WHERE destination_id=? AND download_id=?`, first, downloadID).Scan(&remote); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	m.opts.DeleteMedia = func(_ context.Context, id int64, path string) (bool, error) {
+		calls++
+		if id != downloadID || path != remote {
+			t.Fatalf("delete callback got %d, %q; want %d, %q", id, path, downloadID, remote)
+		}
+		return true, nil
+	}
+	j := job{Download: sql.NullInt64{Int64: downloadID, Valid: true}, Remote: sql.NullString{String: remote, Valid: true}}
+	if err := m.deleteMirroredMedia(context.Background(), j); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatal("deleted local media while another enabled mirror was pending")
+	}
+	if _, err := db.Writer.Exec(`UPDATE backup_jobs SET status='done' WHERE destination_id=? AND download_id=?`, second, downloadID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.deleteMirroredMedia(context.Background(), j); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("delete callback called %d times, want 1", calls)
+	}
+}
+
+func TestCleanMirroredOnlyEvictsCompletedJobs(t *testing.T) {
+	m, db, dir := fixtureManager(t, nil)
+	create := func(name string) int64 {
+		d, err := m.Create(context.Background(), map[string]any{
+			"name": name, "provider": "local", "config": map[string]any{"rootPath": filepath.Join(dir, name)},
+			"mode": "mirror", "enabled": false,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d["id"].(int64)
+	}
+	first, second := create("first"), create("second")
+	if _, err := db.Writer.Exec(`UPDATE backup_destinations SET enabled=1 WHERE id IN (?,?)`, first, second); err != nil {
+		t.Fatal(err)
+	}
+	addSource(t, db, dir, "media.bin", "media", 1)
+	if _, err := db.Writer.Exec(`UPDATE backup_jobs SET status='done' WHERE destination_id=?`, first); err != nil {
+		t.Fatal(err)
+	}
+	deleted := 0
+	m.opts.DeleteMedia = func(context.Context, int64, string) (bool, error) {
+		deleted++
+		return true, nil
+	}
+	cleaned, err := m.CleanMirrored(context.Background(), first)
+	if err != nil || cleaned != 0 || deleted != 0 {
+		t.Fatalf("cleaned incomplete mirrors: count=%d callbacks=%d error=%v", cleaned, deleted, err)
+	}
+	if _, err := db.Writer.Exec(`UPDATE backup_jobs SET status='done' WHERE destination_id=?`, second); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err = m.CleanMirrored(context.Background(), first)
+	if err != nil || cleaned != 1 || deleted != 1 {
+		t.Fatalf("cleaned completed mirrors: count=%d callbacks=%d error=%v", cleaned, deleted, err)
+	}
+}
+
 func waitBackup(t *testing.T, m *Manager, id int64, done, failed int64) {
 	t.Helper()
 	deadline := time.Now().Add(7 * time.Second)
@@ -539,6 +629,86 @@ func TestBackupSecretRedactionAndPassphraseVerificationAcrossRestart(t *testing.
 		t.Fatal(err)
 	}
 }
+func TestFullSnapshotRestoresApplicationStateOnAnotherHost(t *testing.T) {
+	ctx := context.Background()
+	m, db, source := fixtureManager(t, nil)
+	sourceDownloads := filepath.Join(t.TempDir(), "old-host-media")
+	m.opts.DownloadsDir = sourceDownloads
+	for name, content := range map[string]string{
+		"config.json":                 "{\"telegram\":{\"apiId\":123}}",
+		"secret.key":                  "session-key",
+		"sessions/native/account.enc": "encrypted-session",
+	} {
+		file := filepath.Join(source, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(file), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(file, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(sourceDownloads, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sourceDownloads, "legacy.bin"), []byte("downloaded-media"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Writer.ExecContext(ctx, `INSERT INTO kv(key,value,updated_at) VALUES('config', '{"telegram":{"apiId":123},"groups":[{"id":"-10042"}]}', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Writer.ExecContext(ctx, `INSERT INTO downloads(group_id,message_id,file_name,file_path,file_size) VALUES('-10042',7,'legacy.bin','legacy.bin',16)`); err != nil {
+		t.Fatal(err)
+	}
+	object, err := m.CreateFullSnapshotWithPassword(ctx, "migration-backup-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	archive, err := m.DecryptFullSnapshotWithPassword(ctx, filepath.Join(source, "backups", object.Path), "migration-backup-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(archive)
+	newHost := t.TempDir()
+	dataDir := filepath.Join(newHost, "data")
+	stage := filepath.Join(newHost, ".tgdl-full-restore-stage1")
+	if _, err = RestoreSnapshot(ctx, archive, stage, RestoreOptions{Plaintext: true, Full: true}); err != nil {
+		t.Fatal(err)
+	}
+	newDownloads := filepath.Join(newHost, "media")
+	if err = PrepareFullRestore(dataDir, newDownloads, stage); err != nil {
+		t.Fatal(err)
+	}
+	if activated, activateErr := ActivatePendingFullRestore(dataDir, newDownloads); activateErr != nil || !activated {
+		t.Fatalf("activate cross-host restore: activated=%v err=%v", activated, activateErr)
+	}
+	for name, want := range map[string]string{
+		"config.json":                 "{\"telegram\":{\"apiId\":123}}",
+		"secret.key":                  "session-key",
+		"sessions/native/account.enc": "encrypted-session",
+	} {
+		got, readErr := os.ReadFile(filepath.Join(dataDir, filepath.FromSlash(name)))
+		if readErr != nil || string(got) != want {
+			t.Errorf("restored %s = %q, %v; want %q", name, got, readErr, want)
+		}
+	}
+	if got, readErr := os.ReadFile(filepath.Join(newDownloads, "legacy.bin")); readErr != nil || string(got) != "downloaded-media" {
+		t.Errorf("restored external media = %q, %v", got, readErr)
+	}
+	restored, err := sql.Open("sqlite", filepath.Join(dataDir, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	var config string
+	if err = restored.QueryRowContext(ctx, `SELECT value FROM kv WHERE key='config'`).Scan(&config); err != nil || !strings.Contains(config, `"groups":[{"id":"-10042"}]`) {
+		t.Fatalf("application config missing after restore: %s (%v)", config, err)
+	}
+	var count int
+	if err = restored.QueryRowContext(ctx, `SELECT count(*) FROM downloads WHERE group_id='-10042' AND message_id=7`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("download history missing after restore: count=%d err=%v", count, err)
+	}
+}
+
 func BenchmarkLocalMirrorVerify1MiB(b *testing.B) {
 	p, err := newLocal(map[string]any{"rootPath": b.TempDir()})
 	if err != nil {
