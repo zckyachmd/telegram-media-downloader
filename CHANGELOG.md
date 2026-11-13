@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.24] — 2026-11-13
+
+### Fixed
+- Telegram FloodWaits now defer download, backfill and forwarding work without consuming attempts; full forward scans remain queued and backfill applies queue backpressure.
+
 ## [3.4.20] — 2026-10-30
 
 ### Fixed

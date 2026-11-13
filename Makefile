@@ -20,7 +20,7 @@ dev:
 
 release:
 	@mkdir -p "$(DIST_DIR)/$(RELEASE_NAME)"
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) -C core-service build -trimpath -ldflags "-X github.com/botnick/telegram-media-downloader/core-service/internal/version.Version=$(VERSION)" -o "$(CURDIR)/$(DIST_DIR)/$(RELEASE_NAME)/tgdl-server" ./cmd/tgdl-server
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) -C core-service build -trimpath -ldflags "-X github.com/botnick/telegram-media-downloader/core-service/internal/version.Version=$(VERSION) -X github.com/botnick/telegram-media-downloader/core-service/internal/version.AppVersion=$(VERSION)" -o "$(CURDIR)/$(DIST_DIR)/$(RELEASE_NAME)/tgdl-server" ./cmd/tgdl-server
 	cp LICENSE README.md config.example.json "$(DIST_DIR)/$(RELEASE_NAME)/"
 	tar -C "$(DIST_DIR)" -czf "$(DIST_DIR)/$(RELEASE_NAME).tar.gz" "$(RELEASE_NAME)"
 	rm -rf "$(DIST_DIR)/$(RELEASE_NAME)"
