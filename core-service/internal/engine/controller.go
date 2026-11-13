@@ -123,6 +123,35 @@ func (c *Controller) SetScaling(s Scaling) {
 // backpressure uses it to tell slow large files from a stuck queue.
 func (c *Controller) BytesReceived() int64 { return c.received.Load() }
 
+func (c *Controller) DefaultAccountID() string {
+	c.mu.Lock()
+	run := c.run
+	c.mu.Unlock()
+	if run == nil || len(run.ids) == 0 {
+		return ""
+	}
+	return run.ids[0]
+}
+
+// AccountFloodWaitUntil reports the FloodWait gate for one account, if open
+// runtime work is currently waiting for Telegram to reopen that account.
+func (c *Controller) AccountFloodWaitUntil(accountID string) time.Time {
+	c.mu.Lock()
+	run := c.run
+	c.mu.Unlock()
+	if run == nil {
+		return time.Time{}
+	}
+	if accountID == "" && len(run.ids) > 0 {
+		accountID = run.ids[0]
+	}
+	gated, ok := run.accounts[accountID].(interface{ FloodWaitUntil() time.Time })
+	if !ok {
+		return time.Time{}
+	}
+	return gated.FloodWaitUntil()
+}
+
 func (c *Controller) SetUpdateObserver(observer UpdateObserver) {
 	c.mu.Lock()
 	c.observer = observer

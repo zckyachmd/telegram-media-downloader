@@ -254,11 +254,30 @@ func (a *App) updateForwardReservation(ctx context.Context, job forwardJob, stat
 		completedAt = 0
 	}
 	if job.queueID > 0 {
-		_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,updated_at=?,completed_at=? WHERE id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), now, completedAt, job.queueID)
+		_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,attempts=?,retry_at=?,updated_at=?,completed_at=? WHERE id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), job.attempts, job.retryAt, now, completedAt, job.queueID)
 	} else {
-		_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,updated_at=?,completed_at=? WHERE history_id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), now, completedAt, job.historyID)
+		_, _ = a.db.Writer.ExecContext(ctx, `UPDATE tgdl_forward_queue SET status=?,reason=?,stage=?,record_id=?,file_path=?,destinations_json=?,attempts=?,retry_at=?,updated_at=?,completed_at=? WHERE history_id=?`, status, reason, job.stage, job.recordID, job.path, mustJSON(job.destinations), job.attempts, job.retryAt, now, completedAt, job.historyID)
 	}
 	a.notifyForwardQueue()
+}
+
+func (a *App) deferForwardFlood(ctx context.Context, job *forwardJob, err error) bool {
+	wait, flood := tgerr.AsFloodWait(err)
+	if !flood || wait <= 0 {
+		return false
+	}
+	if job.accountID == "" && a.monitor != nil {
+		job.accountID = a.monitor.DefaultAccountID()
+	}
+	a.blockForwardAccount(ctx, job.accountID, wait+time.Second)
+	job.retryAt = time.Now().Add(wait + time.Second).UnixMilli()
+	for i := range job.destinations {
+		if job.destinations[i].Status == "processing" {
+			job.destinations[i].Status = "pending"
+			job.destinations[i].Reason = "Telegram requested a FloodWait; retry deferred"
+		}
+	}
+	return true
 }
 
 func mustJSON(value any) string { raw, _ := json.Marshal(value); return string(raw) }
@@ -291,9 +310,12 @@ func (a *App) directForwardNow(ctx context.Context, job *forwardJob) error {
 		forwardErr := job.directForward(ctx, request)
 		job.destinations[i].DestinationMessageID = destinationMessageID
 		if forwardErr != nil {
-			if wait, flood := tgerr.AsFloodWait(forwardErr); flood {
-				a.blockForwardAccount(ctx, job.accountID, wait+time.Second)
-				job.retryAt = time.Now().Add(wait + time.Second).UnixMilli()
+			if a.deferForwardFlood(ctx, job, forwardErr) {
+				job.destinations[i].DirectFailed = false
+				job.destinations[i].Reason = "Telegram requested a FloodWait; retry deferred"
+				job.destinations[i].Method = "native_forward"
+				a.persistForwardProgress(context.WithoutCancel(ctx), *job)
+				return forwardErr
 			}
 			job.destinations[i].DirectFailed = true
 			job.destinations[i].Reason = "direct forward failed"
@@ -474,7 +496,7 @@ func (a *App) claimForward(ctx context.Context) (*forwardJob, error) {
 	var job forwardJob
 	var facts, forwardConfig, destinations string
 	now := time.Now().UnixMilli()
-	err := a.db.Writer.QueryRowContext(ctx, `UPDATE tgdl_forward_queue SET status='processing',retry_at=0,updated_at=? WHERE id=(
+	err := a.db.Writer.QueryRowContext(ctx, `UPDATE tgdl_forward_queue SET status='processing',reason='',retry_at=0,updated_at=? WHERE id=(
 		SELECT id FROM tgdl_forward_queue WHERE status='pending' AND retry_at<=? AND COALESCE((SELECT paused FROM tgdl_forward_queue_state WHERE id=1),0)=0 ORDER BY id LIMIT 1
 	) RETURNING id,history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,stage,destinations_json,attempts,source_message`, now, now).Scan(
 		&job.queueID, &job.historyID, &job.groupID, &job.groupName, &job.messageID, &job.fileName, &job.topicID, &job.text, &job.recordID, &job.path, &facts, &forwardConfig, &job.stage, &destinations, &job.attempts, &job.sourceMessage)
@@ -1487,6 +1509,11 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 			status = "uncertain"
 			reason = "Telegram response was lost; delivery may have succeeded"
 		}
+		if job.retryAt > time.Now().UnixMilli() && ctx.Err() == nil && status != "uncertain" {
+			status = "pending"
+			reason = "Telegram FloodWait; automatically retrying after the requested wait"
+			job.attempts = max(0, job.attempts-1)
+		}
 		if status == "failed" && job.queueID > 0 && job.attempts < 3 && !job.noAutoRetry && ctx.Err() == nil {
 			status = "pending"
 			reason = ""
@@ -1572,6 +1599,9 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 	if needsSourceDownload {
 		job.stage = "fallback_download"
 		if err := a.downloadForForward(ctx, &job); err != nil {
+			if a.deferForwardFlood(ctx, &job, err) {
+				return
+			}
 			a.forwardFailed(job, "", err)
 			return
 		}
@@ -1612,7 +1642,7 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 		}
 		a.persistForwardProgress(ctx, job)
 		if !a.forwardToRoute(ctx, &job, accountID, settings, deleteAfter) {
-			if job.destinations[i].Status != "uncertain" && !job.waitForEngine && !job.retryBeforeSend {
+			if job.retryAt <= time.Now().UnixMilli() && job.destinations[i].Status != "uncertain" && !job.waitForEngine && !job.retryBeforeSend {
 				job.destinations[i].Status = "failed"
 				job.destinations[i].Reason = "delivery failed"
 			}
@@ -1944,9 +1974,15 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		if _, _, permanent := classifyAccessError(directErr); permanent {
 			job.noAutoRetry = true
 		}
-		if wait, flood := tgerr.AsFloodWait(directErr); flood {
-			a.blockForwardAccount(ctx, accountID, wait+time.Second)
-			job.retryAt = time.Now().Add(wait + time.Second).UnixMilli()
+		if a.deferForwardFlood(ctx, job, directErr) {
+			i := forwardDestinationIndex(job.destinations, destination, request.TopicID)
+			if i >= 0 {
+				job.destinations[i].DirectFailed = false
+				job.destinations[i].Method = "native_forward"
+				job.destinations[i].Reason = "Telegram requested a FloodWait; retry deferred"
+			}
+			a.persistForwardProgress(context.WithoutCancel(ctx), *job)
+			return false
 		}
 		a.persistForwardProgress(ctx, *job)
 		// The source may disallow native forwarding while still allowing the
@@ -1963,6 +1999,9 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 			job.stage = "fallback_download"
 			a.persistForwardProgress(ctx, *job)
 			if err := a.downloadForForward(ctx, job); err != nil {
+				if a.deferForwardFlood(ctx, job, err) {
+					return false
+				}
 				a.forwardFailed(*job, destination, fmt.Errorf("%s; fallback failed: %w", fallbackReason, err))
 				return false
 			}
@@ -1992,6 +2031,9 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 			job.stage = "fallback_download"
 			a.persistForwardProgress(ctx, *job)
 			if err := a.downloadForForward(ctx, job); err != nil {
+				if a.deferForwardFlood(ctx, job, err) {
+					return false
+				}
 				a.forwardFailed(*job, destination, fmt.Errorf("%s; fallback failed: %w", fallbackReason, err))
 				return false
 			}
@@ -2044,6 +2086,9 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		attemptCtx, cancel := context.WithTimeout(ctx, forwardTimeout(info.Size()))
 		used, sent, err = a.forwarder.SendFile(attemptCtx, accountID, req)
 		cancel()
+		if used != "" {
+			accountID, job.accountID = used, used
+		}
 		wait, flood := tgerr.AsFloodWait(err)
 		floodWait, floodLimited = wait, flood
 		if flood && wait > 0 {
@@ -2066,7 +2111,15 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 			return false
 		}
 		if floodLimited && floodWait > 0 {
-			job.retryAt = time.Now().Add(floodWait + time.Second).UnixMilli()
+			a.deferForwardFlood(ctx, job, err)
+			i := forwardDestinationIndex(job.destinations, destination, req.TopicID)
+			if i >= 0 {
+				job.destinations[i].Status = "pending"
+				job.destinations[i].Reason = "Telegram requested a FloodWait; retry deferred"
+				job.destinations[i].Method = "upload"
+			}
+			a.persistForwardProgress(context.WithoutCancel(ctx), *job)
+			return false
 		}
 		if ctx.Err() != nil {
 			return false

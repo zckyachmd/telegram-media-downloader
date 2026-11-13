@@ -157,6 +157,7 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 			go func() {
 				result := <-directResult
 				job.stage, job.destinations = result.job.stage, result.job.destinations
+				job.retryAt = result.job.retryAt
 				if result.err != nil {
 					if hasUncertainDestination(job.destinations) {
 						a.updateForwardReservation(context.WithoutCancel(ctx), job, "uncertain", "")
@@ -168,6 +169,16 @@ func (a *App) ingestTelegramWithForward(ctx context.Context, message *tg.Message
 						a.updateForwardReservation(context.WithoutCancel(ctx), job, "failed", result.err.Error())
 						a.failProcessingForward(context.WithoutCancel(ctx), attemptID, result.err)
 						a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "failed")
+						return
+					}
+					if a.deferForwardFlood(context.WithoutCancel(ctx), &job, result.err) {
+						job.attempts = max(0, result.job.attempts-1)
+						a.updateForwardReservation(context.WithoutCancel(ctx), job, "pending", "Telegram FloodWait; automatically retrying after the requested wait")
+						a.finishProcessingForward(context.WithoutCancel(ctx), attemptID, "pending")
+						select {
+						case a.forwards <- struct{}{}:
+						default:
+						}
 						return
 					}
 					for i := range job.destinations {

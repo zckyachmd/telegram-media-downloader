@@ -81,10 +81,10 @@ func insertDirectScanTx(ctx context.Context, tx *sql.Tx, groupID, groupName, acc
 		return false, err
 	}
 	now := time.Now().UnixMilli()
-	result, err := tx.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,file_name,topic_id,caption,facts_json,source_message,forward_config_json,destinations_json,status,reason,stage,source_kind,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,CASE WHEN (SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing'))>=? THEN 'failed' ELSE 'pending' END,
-		CASE WHEN (SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing'))>=? THEN 'forward queue capacity reached; scan job retained for retry' ELSE '' END,'scan_direct','scan_direct',?,?)
-		ON CONFLICT(group_id,message_id) WHERE source_kind='scan_direct' DO NOTHING`, groupID, groupName, message.ID, attachment.Name, topicID, message.Message, string(facts), encodedMessage.Raw(), string(config), string(destinationState), queueLimit, queueLimit, now, now)
+	result, err := tx.ExecContext(ctx, `INSERT INTO tgdl_forward_queue(group_id,group_name,message_id,file_name,topic_id,caption,facts_json,source_message,forward_config_json,destinations_json,status,reason,stage,source_kind,created_at,updated_at,retry_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,'pending',CASE WHEN (SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing'))>=? THEN 'forward queue capacity reached; deferred for automatic retry' ELSE '' END,'scan_direct','scan_direct',?,?,
+		CASE WHEN (SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing'))>=? THEN ?+1000 ELSE 0 END)
+		ON CONFLICT(group_id,message_id) WHERE source_kind='scan_direct' DO NOTHING`, groupID, groupName, message.ID, attachment.Name, topicID, message.Message, string(facts), encodedMessage.Raw(), string(config), string(destinationState), queueLimit, now, now, queueLimit, now)
 	if err != nil {
 		return false, err
 	}
