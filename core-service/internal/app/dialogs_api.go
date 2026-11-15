@@ -233,7 +233,9 @@ func (a *App) browseDialogsRemote(ctx context.Context) ([]engine.Dialog, error) 
 	}
 	a.monitorOp.Unlock()
 	openDuration = time.Since(phaseStart)
-	if err == nil { stage = "list" }
+	if err == nil {
+		stage = "list"
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +248,9 @@ func (a *App) browseDialogsRemote(ctx context.Context) ([]engine.Dialog, error) 
 	dialogs, err := session.List(-1)
 	listDuration = time.Since(phaseStart)
 	count = len(dialogs)
-	if err == nil { stage = "validate" }
+	if err == nil {
+		stage = "validate"
+	}
 	if err != nil {
 		return nil, err
 	}
