@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -53,10 +54,72 @@ func (a *App) finishProcessingAttempt(ctx context.Context, id int64, outcome, re
 	return err
 }
 
+// notifyProcessingHistory tells admin pages the history changed. Every
+// download writes history twice, so the event is coalesced to one per second
+// instead of competing with download events in each client's queue.
 func (a *App) notifyProcessingHistory() {
-	if a.hub != nil {
-		a.hub.Broadcast(ws.Event{Type: "processing_history_changed", Flat: true})
+	if a.hub == nil || !a.historyNotifyPending.CompareAndSwap(false, true) {
+		return
 	}
+	time.AfterFunc(time.Second, func() {
+		a.historyNotifyPending.Store(false)
+		a.hub.Broadcast(ws.Event{Type: "processing_history_changed", Flat: true, Roles: []string{"admin"}})
+	})
+}
+
+const (
+	// Processing history is a diagnostic log, not the library: keep 30 days
+	// and at most 200k attempts so it cannot grow with the archive.
+	processingHistoryMaxAge  = 30 * 24 * time.Hour
+	processingHistoryMaxRows = 200_000
+	processingHistoryBatch   = 5000
+)
+
+func (a *App) runProcessingHistoryPruner(ctx context.Context) {
+	timer := time.NewTimer(time.Minute)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if _, err := a.pruneProcessingHistory(ctx, time.Now()); err != nil && ctx.Err() == nil && a.output != nil {
+			fmt.Fprintf(a.output, "Processing history cleanup failed: %v\n", err)
+		}
+		timer.Reset(6 * time.Hour)
+	}
+}
+
+// pruneProcessingHistory deletes old attempts in small batches so the single
+// writer is never held for long. Attempts a forward job still points at stay.
+func (a *App) pruneProcessingHistory(ctx context.Context, now time.Time) (int64, error) {
+	var cutoff int64
+	err := a.db.Reader.QueryRowContext(ctx, `SELECT MAX(
+		COALESCE((SELECT id FROM tgdl_processing_attempts WHERE created_at<? ORDER BY id DESC LIMIT 1),0),
+		COALESCE((SELECT id FROM tgdl_processing_attempts ORDER BY id DESC LIMIT 1 OFFSET ?),0))`, now.Add(-processingHistoryMaxAge).UnixMilli(), processingHistoryMaxRows).Scan(&cutoff)
+	if err != nil || cutoff == 0 {
+		return 0, err
+	}
+	var removed int64
+	for ctx.Err() == nil {
+		result, err := a.db.Writer.ExecContext(ctx, `DELETE FROM tgdl_processing_attempts WHERE id IN (
+			SELECT p.id FROM tgdl_processing_attempts p WHERE p.id<=? AND NOT EXISTS (
+				SELECT 1 FROM tgdl_forward_queue q WHERE q.history_id=p.id AND q.status IN ('pending','processing','failed','interrupted','uncertain'))
+			ORDER BY p.id LIMIT ?)`, cutoff, processingHistoryBatch)
+		if err != nil {
+			return removed, err
+		}
+		n, _ := result.RowsAffected()
+		removed += n
+		if n < processingHistoryBatch {
+			break
+		}
+	}
+	if removed > 0 {
+		a.notifyProcessingHistory()
+	}
+	return removed, ctx.Err()
 }
 
 func (a *App) failProcessingAttempt(ctx context.Context, id int64, cause error) error {

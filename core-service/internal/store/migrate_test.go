@@ -168,7 +168,7 @@ func TestForwardQueueMigrationPreservesProcessingAsUncertain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = db.Writer.Exec(`INSERT INTO tgdl_forward_queue(group_id,message_id,status,stage,created_at,updated_at) VALUES('-1001',44,'processing','native_forward',1,1)`); err != nil {
+	if _, err = db.Writer.Exec(`INSERT INTO tgdl_forward_queue(group_id,message_id,status,stage,destinations_json,created_at,updated_at) VALUES('-1001',44,'processing','native_forward','[{"settings":{"destination":"@a"},"status":"processing"}]',1,1),('-1001',46,'processing','native_forward','[{"settings":{"destination":"@a"},"status":"pending"}]',1,1)`); err != nil {
 		t.Fatal(err)
 	}
 	_ = db.Reader.Close()
@@ -185,6 +185,10 @@ func TestForwardQueueMigrationPreservesProcessingAsUncertain(t *testing.T) {
 	}
 	if status != "uncertain" || !strings.Contains(reason, "outcome was unknown") {
 		t.Fatalf("recovered job status=%q reason=%q", status, reason)
+	}
+	// A job that never started sending is safe to run again.
+	if err = db.Reader.QueryRow(`SELECT status FROM tgdl_forward_queue WHERE group_id='-1001' AND message_id=46`).Scan(&status); err != nil || status != "pending" {
+		t.Fatalf("job stopped before sending status=%q err=%v", status, err)
 	}
 	var paused int
 	if err = db.Reader.QueryRow(`SELECT paused FROM tgdl_forward_queue_state WHERE id=1`).Scan(&paused); err != nil || paused != 0 {

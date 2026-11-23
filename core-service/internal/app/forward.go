@@ -70,6 +70,7 @@ type forwardJob struct {
 	noAutoRetry        bool
 	waitForEngine      bool
 	retryBeforeSend    bool
+	route              int
 	directForward      func(context.Context, telegram.ForwardMessageRequest) error
 	sourceMessage      []byte
 }
@@ -172,30 +173,18 @@ func (a *App) queueForward(job forwardJob) {
 		a.forwardFailed(job, "", err)
 		return
 	}
+	// A full queue defers the job instead of failing it, like a direct scan:
+	// it is kept and picked up once the backlog drains.
+	reason, retryAt := "", int64(0)
 	if queued >= queueLimit {
-		now := time.Now().UnixMilli()
-		reason := "auto-forward queue is full"
-		err = tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,destinations_json,status,reason,stage,created_at,updated_at,completed_at)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'failed',?,'enqueue',?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, job.fileName, job.topicID, job.text, job.recordID, job.path, string(facts), string(forwardConfig), string(destinationsJSON), reason, now, now, now).Scan(&job.queueID)
-		if err == nil {
-			err = tx.Commit()
-		} else {
-			_ = tx.Rollback()
-		}
-		if err != nil {
-			a.forwardFailed(job, "", err)
-			return
-		}
-		a.forwardFailed(job, "", errors.New(reason))
-		a.notifyForwardQueue()
-		return
+		reason, retryAt = "forward queue capacity reached; deferred for automatic retry", time.Now().UnixMilli()+1000
 	}
 	now := time.Now().UnixMilli()
 	if job.fileName == "" && job.path != "" {
 		job.fileName = path.Base(job.path)
 	}
-	err = tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,destinations_json,stage,created_at,updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, job.fileName, job.topicID, job.text, job.recordID, job.path, string(facts), string(forwardConfig), string(destinationsJSON), job.stage, now, now).Scan(&job.queueID)
+	err = tx.QueryRowContext(ctx, `INSERT INTO tgdl_forward_queue(history_id,group_id,group_name,message_id,file_name,topic_id,caption,record_id,file_path,facts_json,forward_config_json,destinations_json,stage,reason,retry_at,created_at,updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`, job.historyID, job.groupID, job.groupName, job.messageID, job.fileName, job.topicID, job.text, job.recordID, job.path, string(facts), string(forwardConfig), string(destinationsJSON), job.stage, reason, retryAt, now, now).Scan(&job.queueID)
 	if err != nil {
 		_ = tx.Rollback()
 		a.forwardFailed(job, "", err)
@@ -231,8 +220,10 @@ func (a *App) reserveForward(job *forwardJob) bool {
 		return false
 	}
 	defer tx.Rollback()
-	var queued int
-	if tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tgdl_forward_queue WHERE status IN ('pending','processing')`).Scan(&queued) != nil || queued >= limit {
+	// A paused queue also holds this inline forward: the job goes through the
+	// normal queue after the download instead.
+	var queued, paused int
+	if tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE((SELECT paused FROM tgdl_forward_queue_state WHERE id=1),0) FROM tgdl_forward_queue WHERE status IN ('pending','processing')`).Scan(&queued, &paused) != nil || queued >= limit || paused != 0 {
 		return false
 	}
 	now := time.Now().UnixMilli()
@@ -791,7 +782,7 @@ func (a *App) handleForwardQueueRetry(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid forward job id")
 		return
 	}
-	res, err := a.db.Writer.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status='pending',reason='',retry_at=0,completed_at=0,updated_at=? WHERE id=? AND status IN ('failed','interrupted')`, time.Now().UnixMilli(), id)
+	res, err := a.db.Writer.ExecContext(r.Context(), `UPDATE tgdl_forward_queue SET status='pending',reason='',retry_at=0,attempts=0,completed_at=0,updated_at=? WHERE id=? AND status IN ('failed','interrupted')`, time.Now().UnixMilli(), id)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1232,6 +1223,11 @@ func forwardSettings(cfg map[string]any, groupID string) (settings map[string]an
 		if _, present := settings["directForward"]; !present {
 			settings["directForward"] = false
 		}
+		// Rules saved before destinations became explicit sent to the storage
+		// channel when they named none; keep them delivering there.
+		if _, routed := settings["routes"]; !routed && !hasForwardDestination(settings) {
+			settings["destination"] = "storage"
+		}
 		return settings, toString(group["forwardAccount"]), settings["enabled"] == true
 	}
 	return nil, "", false
@@ -1490,6 +1486,14 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 		if ctx.Err() != nil {
 			status = "interrupted"
 			reason = ctx.Err().Error()
+			// A destination still marked as sending when the server stopped may
+			// have reached Telegram: never let a plain retry resend it.
+			for i := range job.destinations {
+				if job.destinations[i].Status == "processing" {
+					job.destinations[i].Status = "uncertain"
+					job.destinations[i].Reason = "server stopped while this destination was being sent"
+				}
+			}
 		}
 		if job.waitForEngine && ctx.Err() == nil {
 			status = "pending"
@@ -1497,11 +1501,12 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 			job.attempts = max(0, job.attempts-1)
 			job.retryAt = 0
 		}
-		if job.retryBeforeSend {
-			if ctx.Err() == nil {
-				status = "pending"
-				reason = "forward interrupted before Telegram request"
-			}
+		// Stopped before any destination could have been sent (shutdown while
+		// waiting on pacing, the FloodWait gate or a fallback download): the
+		// job goes back to the queue instead of waiting for an operator.
+		if job.retryBeforeSend || ctx.Err() != nil && !hasInFlightDestination(job.destinations) {
+			status = "pending"
+			reason = "forward interrupted before Telegram request"
 			job.attempts = max(0, job.attempts-1)
 			job.retryAt = 0
 		}
@@ -1540,7 +1545,11 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 	// gates them; explicit manual forwards use stage "available".
 	if job.stage != "available" {
 		_, _, enabled := forwardSettings(globalConfig, job.groupID)
-		if !enabled && job.stage != "scan_direct" && job.stage != "manual_direct" {
+		// Decided from the saved snapshot, not the stage: forward() rewrites
+		// the stage, and a retried manual or scan job must stay exempt.
+		scanRoute := toString(job.settings["scanRoute"])
+		exempt := job.settings["manualDirect"] == true || scanRoute == "direct" || scanRoute == "both" || job.stage == "scan_direct" || job.stage == "manual_direct"
+		if !enabled && !exempt {
 			status = "not_applicable"
 			return
 		}
@@ -1641,7 +1650,15 @@ func (a *App) forward(ctx context.Context, job forwardJob) {
 			job.destinations[i].Method = "native_forward"
 		}
 		a.persistForwardProgress(ctx, job)
+		job.route = i
 		if !a.forwardToRoute(ctx, &job, accountID, settings, deleteAfter) {
+			// Cancelled before any send settled this destination (a lost
+			// response is already marked uncertain): it is safe to retry.
+			if ctx.Err() != nil && job.destinations[i].Status == "processing" {
+				job.destinations[i].Status = "pending"
+				job.destinations[i].Reason = "forward interrupted before Telegram request"
+				return
+			}
 			if job.retryAt <= time.Now().UnixMilli() && job.destinations[i].Status != "uncertain" && !job.waitForEngine && !job.retryBeforeSend {
 				job.destinations[i].Status = "failed"
 				job.destinations[i].Reason = "delivery failed"
@@ -1664,6 +1681,15 @@ func ambiguousDeliveryError(err error) bool {
 	}
 	var networkError net.Error
 	return errors.As(err, &networkError)
+}
+
+func hasInFlightDestination(destinations []forwardDestination) bool {
+	for _, destination := range destinations {
+		if destination.Status == "processing" || destination.Status == "uncertain" {
+			return true
+		}
+	}
+	return false
 }
 
 func hasUncertainDestination(destinations []forwardDestination) bool {
@@ -1852,15 +1878,11 @@ func (a *App) persistForwardProgress(ctx context.Context, job forwardJob) {
 	a.notifyForwardQueue()
 }
 
-func forwardDestinationIndex(destinations []forwardDestination, destination string, topicID int) int {
-	for i, state := range destinations {
-		routeDestination := toString(state.Settings["destinationGroupId"])
-		if routeDestination == "" {
-			routeDestination = toString(state.Settings["destination"])
-		}
-		if routeDestination == destination && int(number(state.Settings["destinationTopicId"], 0)) == topicID {
-			return i
-		}
+// routeIndex is the destination being delivered by forwardToRoute; state is
+// kept by position so a destination spelled differently is never lost.
+func (job *forwardJob) routeIndex() int {
+	if job.route >= 0 && job.route < len(job.destinations) {
+		return job.route
 	}
 	return -1
 }
@@ -1900,12 +1922,12 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 				if captionErr != nil {
 					return false
 				}
-				if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); caption == "" && (i < 0 || job.destinations[i].DestinationMessageID == 0) {
+				if i := job.routeIndex(); caption == "" && (i < 0 || job.destinations[i].DestinationMessageID == 0) {
 					request.DropMediaCaptions = true
 				} else {
 					request.EditCaption, request.Caption, request.Entities = true, caption, entities
 					request.ResultMessageID = &destinationMessageID
-					if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); i >= 0 {
+					if i := job.routeIndex(); i >= 0 {
 						request.EditMessageID = job.destinations[i].DestinationMessageID
 					}
 				}
@@ -1920,7 +1942,7 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 				destinationMessageID = sentID
 			}
 		}
-		if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); i >= 0 {
+		if i := job.routeIndex(); i >= 0 {
 			if destinationMessageID > 0 {
 				job.destinations[i].DestinationMessageID = destinationMessageID
 			}
@@ -1952,7 +1974,7 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 			return true
 		}
 		if errors.Is(directErr, engine.ErrEngineNotRunning) {
-			if i := forwardDestinationIndex(job.destinations, destination, request.TopicID); i >= 0 {
+			if i := job.routeIndex(); i >= 0 {
 				job.destinations[i].Status = "pending"
 				job.destinations[i].Reason = "Waiting for monitor to start"
 				job.destinations[i].DirectFailed = false
@@ -1975,7 +1997,7 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 			job.noAutoRetry = true
 		}
 		if a.deferForwardFlood(ctx, job, directErr) {
-			i := forwardDestinationIndex(job.destinations, destination, request.TopicID)
+			i := job.routeIndex()
 			if i >= 0 {
 				job.destinations[i].DirectFailed = false
 				job.destinations[i].Method = "native_forward"
@@ -1987,11 +2009,13 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		a.persistForwardProgress(ctx, *job)
 		// The source may disallow native forwarding while still allowing the
 		// application account to download and send an accessible media file.
-		i := forwardDestinationIndex(job.destinations, destination, request.TopicID)
+		i := job.routeIndex()
+		// The forward may have landed (a message ID came back, or the response
+		// was lost): falling back to an upload could post it twice.
+		if destinationMessageID > 0 || requestIssued && ambiguousDeliveryError(directErr) {
+			return false
+		}
 		if job.path == "" {
-			if destinationMessageID > 0 || requestIssued && ambiguousDeliveryError(directErr) {
-				return false
-			}
 			fallbackReason := "Direct forward was rejected; downloaded and uploaded instead: " + a.safeForwardReason(directErr.Error())
 			if i >= 0 {
 				job.destinations[i].FallbackReason = fallbackReason
@@ -2069,7 +2093,7 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 	for attempt := 1; ; attempt++ {
 		if err = a.waitForwardAccount(ctx, accountID); err != nil {
 			if errors.Is(err, context.Canceled) {
-				if i := forwardDestinationIndex(job.destinations, destination, req.TopicID); i >= 0 {
+				if i := job.routeIndex(); i >= 0 {
 					job.destinations[i].Status = "pending"
 					job.destinations[i].Reason = "forward interrupted before Telegram request"
 					job.destinations[i].Method = "upload"
@@ -2102,7 +2126,7 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 	}
 	if err != nil {
 		if errors.Is(err, engine.ErrEngineNotRunning) {
-			if i := forwardDestinationIndex(job.destinations, destination, req.TopicID); i >= 0 {
+			if i := job.routeIndex(); i >= 0 {
 				job.destinations[i].Status = "pending"
 				job.destinations[i].Reason = "Waiting for monitor to start"
 				job.destinations[i].DirectFailed = false
@@ -2112,7 +2136,7 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 		}
 		if floodLimited && floodWait > 0 {
 			a.deferForwardFlood(ctx, job, err)
-			i := forwardDestinationIndex(job.destinations, destination, req.TopicID)
+			i := job.routeIndex()
 			if i >= 0 {
 				job.destinations[i].Status = "pending"
 				job.destinations[i].Reason = "Telegram requested a FloodWait; retry deferred"
@@ -2121,16 +2145,15 @@ func (a *App) forwardToRoute(ctx context.Context, job *forwardJob, accountID str
 			a.persistForwardProgress(context.WithoutCancel(ctx), *job)
 			return false
 		}
-		if ctx.Err() != nil {
-			return false
-		}
-		if ambiguousDeliveryError(err) {
-			if i := forwardDestinationIndex(job.destinations, destination, req.TopicID); i >= 0 {
+		// A cancelled upload may already have reached Telegram, so it is
+		// uncertain like a lost response, never silently retried.
+		if ctx.Err() != nil || ambiguousDeliveryError(err) {
+			if i := job.routeIndex(); i >= 0 {
 				job.destinations[i].Status = "uncertain"
 				job.destinations[i].Reason = "Telegram response was lost; delivery may have succeeded"
 				job.destinations[i].Method = "upload"
 			}
-			a.persistForwardProgress(ctx, *job)
+			a.persistForwardProgress(context.WithoutCancel(ctx), *job)
 			return false
 		}
 		if _, _, permanent := classifyAccessError(err); permanent {
@@ -2570,11 +2593,14 @@ func (a *App) forwardCandidate(ctx context.Context, groupID string, messageID in
 	if !enabled {
 		return false, nil, "", nil
 	}
-	var directQueued bool
-	if err := a.db.Reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgdl_forward_queue WHERE group_id=? AND message_id=? AND (stage='scan_direct' OR (json_valid(forward_config_json) AND json_extract(forward_config_json,'$.settings.scanRoute') IN ('direct','both'))))`, groupID, messageID).Scan(&directQueued); err != nil {
+	// Any earlier forward of this message (a direct scan route, or a native
+	// forward started by a download attempt that later failed) owns it; a
+	// retried download must not forward it again.
+	var queued bool
+	if err := a.db.Reader.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tgdl_forward_queue WHERE group_id=? AND message_id=? AND status<>'not_applicable')`, groupID, messageID).Scan(&queued); err != nil {
 		return false, nil, "", err
 	}
-	if directQueued {
+	if queued {
 		return false, settings, accountID, nil
 	}
 	var exists bool

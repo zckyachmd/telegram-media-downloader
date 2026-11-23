@@ -56,6 +56,7 @@ with sync_playwright() as p:
       pending = null;
       const select = document.createElement('select');
       select.id = 'fwd-scan-route';
+      select.innerHTML = '<option value="download"></option><option value="direct"></option><option value="both"></option>';
       select.value = 'both';
       void onChange({target:select});
       const saved = pending;

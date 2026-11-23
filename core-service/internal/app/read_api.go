@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/botnick/telegram-media-downloader/core-service/internal/auth"
-	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 	"math"
 	"net/http"
 	"net/url"
@@ -16,6 +14,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/botnick/telegram-media-downloader/core-service/internal/auth"
+	"github.com/botnick/telegram-media-downloader/core-service/internal/telegram"
 )
 
 func registerGalleryRoutes(mux *http.ServeMux, a *App) {
@@ -24,7 +25,7 @@ func registerGalleryRoutes(mux *http.ServeMux, a *App) {
 	mux.Handle("GET /api/system/health", a.requireAdmin(http.HandlerFunc(a.handleAPISystemHealth)))
 	mux.Handle("GET /api/monitor/status", guard(http.HandlerFunc(a.handleAPIMonitorStatus)))
 	mux.Handle("GET /api/queue/snapshot", guard(http.HandlerFunc(a.handleAPIQueueSnapshot)))
-	mux.Handle("GET /api/forward-queue", guard(http.HandlerFunc(a.handleAPIForwardQueueSnapshot)))
+	mux.Handle("GET /api/forward-queue", a.requireAdmin(http.HandlerFunc(a.handleAPIForwardQueueSnapshot)))
 	mux.Handle("GET /api/downloads", guard(http.HandlerFunc(a.handleAPIDownloads)))
 	mux.Handle("GET /api/downloads/all", guard(http.HandlerFunc(a.handleAPIDownloadsAll)))
 	mux.Handle("GET /api/downloads/search", guard(http.HandlerFunc(a.handleAPIDownloadsSearch)))
@@ -121,12 +122,15 @@ func (a *App) handleAPIQueueSnapshot(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, 500, "queue read failed")
 		return
 	}
-	forwardQueue, err := a.forwardQueueSnapshot(r.Context(), 0)
-	if err != nil {
-		writeJSONError(w, 500, "forward queue read failed")
-		return
+	// The forward queue names destinations and caption rules: admins only.
+	if sess, _ := auth.SessionFromContext(r.Context()); sess.Role == "admin" {
+		forwardQueue, err := a.forwardQueueSnapshot(r.Context(), 0)
+		if err != nil {
+			writeJSONError(w, 500, "forward queue read failed")
+			return
+		}
+		snapshot["forwardQueue"] = forwardQueue
 	}
-	snapshot["forwardQueue"] = forwardQueue
 	writeJSON(w, http.StatusOK, snapshot)
 }
 

@@ -2,7 +2,44 @@
 
 All notable changes to this project are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.4.23] — 2026-10-30
+## [3.5.1] — 2026-11-18
+
+### Fixed
+- **A full forward queue no longer drops jobs.** An auto-forward or manual forward added while `advanced.forwarder.queueSize` jobs were waiting was recorded as failed; it now waits as pending and is picked up once the backlog drains, the way direct scan jobs already did.
+- **No resend after a restart in the middle of a send.** When the server stopped while a destination was being sent, the job became "interrupted", and Retry could send that destination a second time. That destination is now marked uncertain, so an operator confirms or resends it on purpose.
+
+### Added
+- **Building on small hosts.** The Dockerfile accepts optional `GO_BUILD_JOBS`, `GO_BUILD_MAXPROCS` and `GO_BUILD_MEMLIMIT` build arguments so the image can be compiled on a 1–2 GiB Raspberry Pi, and caches Go modules and build output between builds. Defaults are unchanged. `docker-compose.yml` now passes `GOMEMLIMIT`, `TGDL_DOWNLOAD_THREADS` and `FASTSTART_CONCURRENCY` from `.env` (empty keeps the built-in defaults), and `.env.example` has a small-host block. See `docs/LOW-MEMORY-BUILDS.md`. Contributed by Zacky Achmad ([@zckyachmd](https://github.com/zckyachmd)).
+
+### Documentation
+- New forward queue guide (`docs/GO-FORWARD-QUEUE.md`); auto-forward settings, `advanced.forwarder` keys and the forward queue API are documented in CONFIGURATION.md and API.md; README, FEATURES and the project site describe forwarding, processing history and Indonesian, and thank the contributor.
+- Service worker cache version `v35100`.
+
+## [3.5.0] — 2026-11-18
+
+Forwarding work contributed by **Zacky Achmad ([@zckyachmd](https://github.com/zckyachmd))** in #116 and #117, ported onto 3.4.19 and finished here. Thank you!
+
+### Added
+- **Durable forward queue.** Auto-forward and manual forwards now go through a queue saved in the database instead of memory, so work survives restarts. The Queue page has a Forward view with per-destination state, retry, retry-all, reconcile and pause/resume.
+- **FloodWait protection for forwarding.** A Telegram FloodWait closes a per-account gate that every forward worker respects and that persists across restarts, and the job is retried after the requested wait instead of failing.
+- **Forum topics and several destinations per rule**, with topic-to-topic routes, a direct scan route that forwards without downloading, protected (no-forward) copies and custom captions edited after a native forward.
+- **Processing history** on the Logs page: each download attempt with its outcome, duplicate skips, forward result and local cleanup. It keeps 30 days and at most 200,000 attempts.
+- **Indonesian** interface language.
+- Concurrent Telegram dialog listings are coalesced on the server and in the browser.
+
+### Safety
+- A forward whose Telegram response was lost, or an upload cancelled while sending, is marked *uncertain* and never resent automatically; an operator confirms it. A job stopped before anything was sent goes back to the queue on its own.
+- A download retried after a failure does not forward the message again.
+- Rules saved before destinations became explicit keep forwarding to the storage channel.
+- The forward queue (destinations, caption rules) is visible to admins only.
+
+### Not included from the contributor's fork
+- MCP agent control, complete instance backup/restore, Google-Drive-only media with local deletion, and the development asset mode. They are larger security and data-safety surfaces and can come in separate reviews.
+
+### Service worker
+- `VERSION = 'v35000'`
+
+## [3.4.19] — 2026-11-04
 
 ### Fixed
 - Forward queue items keep status, stage and retry controls on a compact horizontal row at desktop widths.

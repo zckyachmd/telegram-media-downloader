@@ -60,6 +60,17 @@ type Sink func(context.Context, *Work, *tg.Message, telegram.MediaDownloader) er
 type ForwardSink func(context.Context, *Work, *tg.Message, telegram.MediaDownloader, func(context.Context, telegram.ForwardMessageRequest) error) error
 type ForwardSinkAdapter struct{ ForwardSink }
 
+// WorkSink ingests one claimed message. Sink and ForwardSinkAdapter both
+// implement it, so a mistyped sink fails to compile instead of failing every
+// download at runtime.
+type WorkSink interface {
+	Invoke(context.Context, *Work, *tg.Message, telegram.MediaDownloader, func(context.Context, telegram.ForwardMessageRequest) error) error
+}
+
+func (s Sink) Invoke(ctx context.Context, work *Work, message *tg.Message, transport telegram.MediaDownloader, _ func(context.Context, telegram.ForwardMessageRequest) error) error {
+	return s(ctx, work, message, transport)
+}
+
 func (s ForwardSinkAdapter) Invoke(ctx context.Context, work *Work, message *tg.Message, transport telegram.MediaDownloader, forward func(context.Context, telegram.ForwardMessageRequest) error) error {
 	return s.ForwardSink(ctx, work, message, transport, forward)
 }
@@ -77,7 +88,7 @@ type Controller struct {
 	factory        Factory
 	filter         Filter
 	route          LiveRoute
-	sink           any
+	sink           WorkSink
 	observer       UpdateObserver
 	notify         func(string, error)
 	opMu           sync.Mutex
@@ -178,7 +189,7 @@ type running struct {
 	progress        map[int64]*transferStats
 }
 
-func New(writer, reader *sql.DB, dataDir string, factory Factory, filter Filter, sink any, notify func(string, error)) *Controller {
+func New(writer, reader *sql.DB, dataDir string, factory Factory, filter Filter, sink WorkSink, notify func(string, error)) *Controller {
 	if factory == nil {
 		factory = func(cfg AccountConfig, state *telegram.UpdateState, handler func(context.Context, tg.UpdatesClass) error, gap func(int64)) (Account, error) {
 			return telegram.NewAccount(cfg.Telegram, state, handler, gap)
@@ -1096,13 +1107,7 @@ func (c *Controller) worker(run *running, index int) {
 				_, err := sender.ForwardMessage(ctx, req)
 				return err
 			}
-			if sink, ok := c.sink.(ForwardSinkAdapter); ok {
-				err = sink.Invoke(attemptCtx, work, message, transport, forward)
-			} else if sink, ok := c.sink.(Sink); ok {
-				err = sink(attemptCtx, work, message, transport)
-			} else {
-				err = errors.New("invalid monitor sink")
-			}
+			err = c.sink.Invoke(attemptCtx, work, message, transport, forward)
 		}
 		if err != nil && attemptCtx.Err() != nil {
 			err = context.Cause(attemptCtx)

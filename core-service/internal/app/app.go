@@ -46,46 +46,41 @@ type Config struct {
 	CookieName             string
 	SessionTTL             time.Duration
 	SecureCookies          bool
-	DevMode                bool
 	Output                 io.Writer
-	Restart                func()
-	MCPIssuer              string
 	RequireMonitorForwards bool
 }
 type App struct {
-	devMode           bool
-	restart           func()
-	httpOptions       HTTPOptions
-	proxyPolicy       proxyPolicy
-	webPolicy         webPolicyCache
-	apiRL             *rateLimiter
-	monitor           *engine.Controller
-	gateForwards      bool
-	forwarder         forwardSender
-	forwardActivityMu sync.Mutex
-	manualForwardMu   sync.Mutex
-	activeForwards    map[string]int
-	forwards          chan struct{}
-	accounts          *accounts.Repository
-	accountWizard     *accounts.Wizard
-	monitorOp         sync.Mutex
-	dialogVersion     uint64             // monitorOp guards confirmed remote removals vs older listings
-	dialogListing     singleflight.Group // shares concurrent Telegram listings; never caches settled results
-	remoteBlocks      singleflight.Group
-	historyMu         sync.Mutex
-	historyJobs       map[string]*historyJob
-	historyCancel     map[string]context.CancelFunc
-	historyDrain      bool
-	enginePaused      bool // historyMu guards the global Engine pause gate.
-	ctx               context.Context
-	cancel            context.CancelFunc
-	bootWG            sync.WaitGroup
-	ambientWG         sync.WaitGroup
-	rescueWake        chan struct{}
-	rescueMu          sync.Mutex
-	releaseOwnership  func()
-	closeOnce         sync.Once
-	closeErr          error
+	historyNotifyPending atomic.Bool
+	httpOptions          HTTPOptions
+	proxyPolicy          proxyPolicy
+	webPolicy            webPolicyCache
+	apiRL                *rateLimiter
+	monitor              *engine.Controller
+	gateForwards         bool
+	forwarder            forwardSender
+	forwardActivityMu    sync.Mutex
+	manualForwardMu      sync.Mutex
+	activeForwards       map[string]int
+	forwards             chan struct{}
+	accounts             *accounts.Repository
+	accountWizard        *accounts.Wizard
+	monitorOp            sync.Mutex
+	dialogVersion        uint64             // monitorOp guards confirmed remote removals vs older listings
+	dialogListing        singleflight.Group // shares concurrent Telegram listings; never caches settled results
+	remoteBlocks         singleflight.Group
+	historyMu            sync.Mutex
+	historyJobs          map[string]*historyJob
+	historyCancel        map[string]context.CancelFunc
+	historyDrain         bool // historyMu guards the global Engine pause gate.
+	ctx                  context.Context
+	cancel               context.CancelFunc
+	bootWG               sync.WaitGroup
+	ambientWG            sync.WaitGroup
+	rescueWake           chan struct{}
+	rescueMu             sync.Mutex
+	releaseOwnership     func()
+	closeOnce            sync.Once
+	closeErr             error
 
 	backups              *backup.Manager
 	fullOperationMu      sync.Mutex
@@ -102,8 +97,6 @@ type App struct {
 	jobs                 *jobs.Tracker
 	dataDir              string
 	cluster              cluster.Store
-	mcpControl           *mcpcontrol.Store
-	mcpIssuer            string
 	clusterHTTP          *cluster.Client
 	clusterMu            sync.Mutex
 	clusterWG            sync.WaitGroup
@@ -119,8 +112,6 @@ type App struct {
 	dedupWG              sync.WaitGroup
 	dedupClosed          bool
 	mediaMu              sync.RWMutex
-	remoteStreamSlots    chan struct{}
-	driveMediaMetrics    driveMediaMetrics
 	purgeMu              sync.Mutex
 	purgeEpoch           uint64 // guarded by purgeMu; invalidates unresolved URL requests
 	purgeWG              sync.WaitGroup
@@ -248,8 +239,7 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		ttl = 7 * 24 * time.Hour
 	}
 	read := dbread.NewHandler(filepath.Join(cfg.DataDir, "db.sqlite"), nil)
-	a := &App{devMode: cfg.DevMode, db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, mcpControl: mcpControl, mcpIssuer: cfg.MCPIssuer, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("updateStatus"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
-	a.restart = cfg.Restart
+	a := &App{db: db, sessions: auth.NewSessionStore(db.Writer, cookie, ttl), hub: ws.NewHub(64), read: read, config: auth.ConfigStore{DB: db.Writer}, jobs: jobs.NewTracker(), dataDir: cfg.DataDir, loginRL: newRateLimiter(10, 15*time.Minute), setupRL: newRateLimiter(20, 15*time.Minute), secureCookies: cfg.SecureCookies, output: cfg.Output, resetTokens: make(map[string]time.Time), dedupLastScan: map[string]any{}, dedupScanStatus: dedupIdleStatus("dedupScan"), dedupDeleteStatus: dedupIdleStatus("dedupDelete"), leaveBatchStatus: dedupIdleStatus("chatLeaveBatch"), updateStatus: dedupIdleStatus("autoUpdate"), faststartStatus: faststartIdleStatus(), faststartLastRun: map[string]any{}, thumbBuildStatus: thumbsIdleStatus("thumbsBuild"), thumbRebuildStatus: thumbsIdleStatus("thumbsRebuild"), dbIntegrityStatus: maintenanceIdleStatus("dbIntegrity"), filesVerifyStatus: maintenanceIdleStatus("filesVerify"), reindexStatus: maintenanceIdleStatus("reindex"), vacuumStatus: maintenanceIdleStatus("dbVacuum"), nsfw: newNSFWRuntime()}
 	a.gateForwards = cfg.RequireMonitorForwards
 	a.httpOptions, a.proxyPolicy, a.apiRL = cfg.HTTP, proxy, newRateLimiter(10000, time.Minute)
 	a.seekbar = newSeekbarState()
@@ -362,9 +352,6 @@ func New(ctx context.Context, cfg Config) (*App, error) {
 		a.Close()
 		return nil, err
 	}
-	a.historyMu.Lock()
-	a.enginePaused = objectAt(stored, "monitor")["enginePaused"] == true
-	a.historyMu.Unlock()
 	if err := a.recoverPurges(ctx); err != nil {
 		a.Close()
 		return nil, fmt.Errorf("recover purge jobs: %w", err)

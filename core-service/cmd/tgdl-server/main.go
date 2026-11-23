@@ -84,22 +84,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
-	mcpDisabled := os.Getenv("TGDL_MCP_DISABLED") == "1"
-	mcpPort := 3001
-	if !mcpDisabled {
-		if raw := strings.TrimSpace(os.Getenv("TGDL_MCP_PORT")); raw != "" {
-			mcpPort, err = strconv.Atoi(raw)
-			if err != nil || mcpPort < 1 || mcpPort > 65535 {
-				_, _ = fmt.Fprintln(stderr, "TGDL_MCP_PORT must be between 1 and 65535")
-				return 2
-			}
-		}
-	}
-	mcpIssuer := strings.TrimRight(strings.TrimSpace(os.Getenv("TGDL_MCP_ISSUER")), "/")
-	if mcpIssuer == "" {
-		mcpIssuer = "http://" + net.JoinHostPort("127.0.0.1", strconv.Itoa(mcpPort))
-	}
-	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, Restart: stop, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", DevMode: devMode, MCPIssuer: mcpIssuer, RequireMonitorForwards: true})
+	a, err := app.New(ctx, app.Config{HTTP: httpOptions, DataDir: cfg.DataDir, DownloadsDir: cfg.DownloadsDir, Port: cfg.Port, Static: static, CookieName: cfg.CookieName, SessionTTL: cfg.SessionTTL, Output: stdout, SecureCookies: os.Getenv("TGDL_SECURE_COOKIES") == "1", RequireMonitorForwards: true})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, err)
 		return 1

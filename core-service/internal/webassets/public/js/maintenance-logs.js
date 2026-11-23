@@ -86,7 +86,6 @@ const _lines = []; // ring buffer of {ts,source,level,msg}
 let _historyOffset = 0;
 let _historyWired = false;
 let _historyRefreshTimer = null;
-let _logsViewWired = false;
 
 // Track every unique source we see. If a new one appears, re-render
 // the chip group + bump the count badge. Cheap (Set.has is O(1)).
@@ -510,9 +509,17 @@ function _wireProcessingHistory() {
         'download_complete', 'forward_error', 'file_deleted', 'processing_history_changed',
         'group_purged', 'group_files_deleted', 'purge_all',
     ]) {
+        // Throttled, and only while the Logs page is on screen: each refresh
+        // counts the whole history table, and downloads fire these events
+        // continuously.
         ws.on(event, () => {
-            clearTimeout(_historyRefreshTimer);
-            _historyRefreshTimer = setTimeout(() => _loadProcessingHistory(), 250);
+            if (_historyRefreshTimer) return;
+            _historyRefreshTimer = setTimeout(() => {
+                _historyRefreshTimer = null;
+                const panel = $('processing-history-more')?.closest('section');
+                if (document.hidden || !panel || panel.offsetParent === null) return;
+                _loadProcessingHistory();
+            }, 3000);
         });
     }
 }
@@ -528,23 +535,6 @@ export function init() {
     _renderSourceChips();
     _renderAll();
     _wireProcessingHistory();
-    if (!_logsViewWired) {
-        _logsViewWired = true;
-        const tabs = Array.from(document.querySelectorAll('[data-logs-view]'));
-        const selectView = (view) => {
-            for (const tab of tabs) {
-                const selected = tab.dataset.logsView === view;
-                tab.setAttribute('aria-selected', String(selected));
-                tab.tabIndex = selected ? 0 : -1;
-            }
-            for (const panel of document.querySelectorAll('[data-logs-panel]')) {
-                panel.hidden = panel.dataset.logsPanel !== view;
-            }
-        };
-        for (const tab of tabs) tab.addEventListener('click', () => selectView(tab.dataset.logsView));
-        document.querySelector('#page-maintenance-logs [data-logs-view="server"]')?.setAttribute('tabindex', '0');
-        document.querySelector('#page-maintenance-logs [data-logs-view="mcp"]')?.setAttribute('tabindex', '-1');
-    }
     _loadProcessingHistory();
     // Refresh backfill every time the user opens the page so they're not
     // staring at a stale tail from a previous visit.

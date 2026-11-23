@@ -185,7 +185,7 @@ func TestDialogsLeasePreventsIdleStopButAllowsHardStop(t *testing.T) {
 		return &readyAccount{}, nil
 	}, func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
 		return Target{}, false, nil
-	}, func(context.Context, *Work, *tg.Message, telegram.MediaDownloader) error { return nil }, nil)
+	}, Sink(func(context.Context, *Work, *tg.Message, telegram.MediaDownloader) error { return nil }), nil)
 	if err := c.StartJobs(ctx, ctx, []AccountConfig{{ID: "one"}}, 1, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +397,7 @@ func TestPendingHistoryRecoveryPreventsStartup(t *testing.T) {
 	filter := func(context.Context, string, *tg.Message, tg.UpdatesClass) (Target, bool, error) {
 		return Target{}, true, nil
 	}
-	c := New(s.writer, s.reader, t.TempDir(), factory, filter, func(context.Context, *Work, *tg.Message, telegram.MediaDownloader) error { return nil }, nil)
+	c := New(s.writer, s.reader, t.TempDir(), factory, filter, Sink(func(context.Context, *Work, *tg.Message, telegram.MediaDownloader) error { return nil }), nil)
 	if err := c.Start(ctx, ctx, []AccountConfig{{ID: "one"}}, 1, 1); err == nil {
 		t.Fatal("lost history recovery marker")
 	}
